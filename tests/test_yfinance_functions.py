@@ -13,6 +13,7 @@ from finance_assistant.yfinance_functions import (
     simple_moving_average,
     rsi,
     news_headlines,
+    debt_to_equity
 )
 
 # Example ticker for testing
@@ -39,11 +40,18 @@ def test_rsi():
 def test_news_headlines():
     print('News Headlines:', news_headlines(TICKER))
 
+def test_debt_to_equity():
+    stock = yf.Ticker(TICKER)
+    print('Raw info:', stock.info)
+    dte = debt_to_equity(stock)
+    print('Debt/Equity:', dte)
+
 if __name__ == '__main__':
     # test_stock_price()
     # test_current_price()
     # test_company_info()
     # test_historical_data()
-    test_simple_moving_average()
-    test_rsi()
+    # test_simple_moving_average()
+    # test_rsi()
+    test_debt_to_equity()
     # test_news_headlines()
