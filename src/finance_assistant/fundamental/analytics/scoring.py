@@ -3,9 +3,14 @@ from .fundamentals import profit_margin, roe_return_on_equity, roa_return_on_ass
 from .valuation import pe_ratio, peg_ratio
 from .health import debt_to_equity, current_ratio, debt_to_assets
 import pandas as pd
+import yfinance as yf
 
 def fundamental_score(ticker_or_obj) -> dict:
-    """Get comprehensive fundamental metrics for a stock."""
+    """
+    Get comprehensive fundamental metrics for a stock.
+    Returns a dictionary of key ratios and metrics for high-level screening.
+    Each metric is a snapshot of a company's financial health, profitability, and valuation.
+    """
     stock = _get_ticker(ticker_or_obj)
     info = stock.info
     
@@ -33,7 +38,11 @@ def fundamental_score(ticker_or_obj) -> dict:
     }
 
 def _calculate_debt_to_assets(info) -> float:
-    """Calculate debt to assets ratio."""
+    """
+    Calculate debt to assets ratio.
+    This ratio measures what proportion of a company's assets are financed by debt.
+    High values (>0.5) may indicate higher financial risk, while low values suggest a more conservative balance sheet.
+    """
     total_debt = info.get('totalDebt')
     total_assets = info.get('totalAssets')
     
@@ -47,7 +56,11 @@ def _calculate_debt_to_assets(info) -> float:
 # Advanced/extra metrics
 
 def return_on_ebit(ticker_or_obj) -> float:
-    """Calculate return on EBIT (EBIT margin)."""
+    """
+    Calculate return on EBIT (EBIT margin).
+    EBIT (Earnings Before Interest and Taxes) is a measure of operational profitability, showing how much profit a company makes from its core business before financing and tax costs.
+    A high EBIT margin indicates strong operational efficiency; a low margin may signal cost issues or weak pricing power.
+    """
     stock = _get_ticker(ticker_or_obj)
     
     # Try using financials data
@@ -87,7 +100,11 @@ def return_on_ebit(ticker_or_obj) -> float:
     return float('nan')
 
 def return_on_capital(ticker_or_obj) -> float:
-    """Calculate ROIC (Return on Invested Capital)."""
+    """
+    Calculate ROIC (Return on Invested Capital).
+    ROIC measures how effectively a company uses all capital (debt and equity) to generate profits.
+    High ROIC (>10-15%) is a sign of a quality business with a durable competitive advantage; low ROIC may indicate poor capital allocation or a commoditized business.
+    """
     stock = _get_ticker(ticker_or_obj)
     info = stock.info
     
@@ -137,7 +154,11 @@ def return_on_capital(ticker_or_obj) -> float:
     return float('nan')
 
 def roic_greenblatt(ticker_or_obj) -> float:
-    """Calculate Greenblatt's ROIC (EBIT / (Net Working Capital + Net Fixed Assets))."""
+    """
+    Calculate Greenblatt's ROIC (EBIT / (Net Working Capital + Net Fixed Assets)).
+    This version of ROIC, popularized by Joel Greenblatt, focuses on tangible capital employed in the business.
+    High values suggest efficient use of working capital and fixed assets; low or negative values may indicate capital inefficiency or business stress.
+    """
     stock = _get_ticker(ticker_or_obj)
     
     try:
@@ -189,7 +210,13 @@ def roic_greenblatt(ticker_or_obj) -> float:
     return float('nan')
 
 def magic_formula_score(ticker_or_obj) -> dict:
-    """Calculate Magic Formula components: Earnings Yield (EBIT/EV) and ROIC."""
+    """
+    Calculate Magic Formula components: Earnings Yield (EBIT/EV) and ROIC.
+    - EBIT/EV (Earnings Yield) measures how much operating profit you get for each dollar invested in the business (enterprise value).
+      High values indicate a potentially undervalued stock; low or negative values may signal overvaluation or business trouble.
+    - ROIC (see above) measures capital efficiency.
+    The Magic Formula ranks stocks by both metrics to find high-quality, attractively priced companies.
+    """
     stock = _get_ticker(ticker_or_obj)
     info = stock.info
     
@@ -226,3 +253,75 @@ def magic_formula_score(ticker_or_obj) -> dict:
         'ebit_ev': ebit_ev if not pd.isna(ebit_ev) else float('nan'),
         'roc': roc
     }
+
+def get_global_index_tickers():
+    """
+    Robustly aggregate tickers from major world indices (S&P 500, FTSE 100, DAX, CAC 40, Nikkei 225, ASX 200).
+    Tries yfinance index constituents, falls back to static lists if needed.
+    Returns a list of tickers (strings).
+    """
+    tickers = set()
+    # Try yfinance index constituents
+    index_symbols = {
+        'S&P 500': '^GSPC',
+        'FTSE 100': '^FTSE',
+        'DAX': '^GDAXI',
+        'CAC 40': '^FCHI',
+        'Nikkei 225': '^N225',
+        'ASX 200': '^AXJO',
+    }
+    for name, symbol in index_symbols.items():
+        try:
+            idx = yf.Ticker(symbol)
+            # yfinance may expose constituents via .constituents or .tickers
+            if hasattr(idx, 'constituents') and idx.constituents:
+                tickers.update(idx.constituents)
+            elif hasattr(idx, 'tickers') and idx.tickers:
+                tickers.update(idx.tickers)
+        except Exception:
+            pass
+    return list(tickers)
+
+def get_sector_peers_api(target_ticker, max_peers=20):
+    """
+    Get a list of peer tickers in the same sector and country as the target_ticker using yfinance.
+    Aggregates tickers from major world indices for a global universe.
+    """
+    stock = yf.Ticker(target_ticker)
+    sector = stock.info.get('sector')
+    country = stock.info.get('country')
+    if not sector:
+        return []
+    tickers = get_global_index_tickers()
+    peers = []
+    for t in tickers:
+        if t == target_ticker:
+            continue
+        try:
+            peer_info = yf.Ticker(t).info
+            if peer_info.get('sector') == sector and peer_info.get('country') == country:
+                peers.append(t)
+            if len(peers) >= max_peers:
+                break
+        except Exception:
+            continue
+    return peers
+
+def compute_sector_averages_api(target_ticker, metrics_func, max_peers=20):
+    """
+    Compute the average of each metric for all peers in the same sector and country as the target_ticker using yfinance.
+    Returns a dict of sector averages for each metric.
+    """
+    peers = get_sector_peers_api(target_ticker, max_peers=max_peers)
+    results = []
+    for peer in peers:
+        try:
+            results.append(metrics_func(peer))
+        except Exception:
+            continue
+    if not results:
+        return {}
+    import numpy as np
+    keys = results[0].keys()
+    avg = {k: round(np.nanmean([r[k] for r in results if r[k] is not None]), 3) for k in keys}
+    return avg

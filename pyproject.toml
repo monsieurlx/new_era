@@ -41,6 +41,7 @@ dependencies = [
     "yfinance",
     "colorama",
     "streamlit",
+    "lxml"
 ]
 
 [project.optional-dependencies]

@@ -1,15 +1,6 @@
 import pytest
 import yfinance as yf
-import sys
-import os 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
-
-from finance_assistant.price import stock_price, current_price, simple_moving_average, rsi
-from finance_assistant.info import company_info, get_sector
-from finance_assistant.news import news_headlines
-from finance_assistant.valuation import pe_ratio, peg_ratio, price_to_book, eps_earnings_per_share
-from finance_assistant.fundamentals import profit_margin, operating_margin, roe_return_on_equity, roa_return_on_assets, revenue_growth, earnings_growth, eps_growth
-from finance_assistant.health import debt_to_equity, current_ratio, quick_ratio, debt_to_assets
+from finance_assistant import stock_price, current_price, simple_moving_average, rsi, company_info, get_sector, news_headlines, pe_ratio, peg_ratio, price_to_book, eps_earnings_per_share, profit_margin, operating_margin, roe_return_on_equity, roa_return_on_assets, revenue_growth, earnings_growth, eps_growth, debt_to_equity, current_ratio, quick_ratio, debt_to_assets
 
 TICKER = 'AAPL'
 

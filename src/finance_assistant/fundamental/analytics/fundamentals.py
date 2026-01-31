@@ -2,6 +2,10 @@ from .data import _get_ticker
 import pandas as pd
 
 def profit_margin(ticker_or_obj) -> float:
+    """
+    Profit Margin: Measures how much of each dollar in revenue a company actually keeps as profit after all expenses.
+    High profit margins indicate strong pricing power and cost control; low margins may signal competitive pressure or high costs.
+    """
     stock = _get_ticker(ticker_or_obj)
     info = stock.info
     margin = info.get('profitMargins')
@@ -23,6 +27,10 @@ def profit_margin(ticker_or_obj) -> float:
     return float('nan')
 
 def operating_margin(ticker_or_obj) -> float:
+    """
+    Operating Margin: Shows the proportion of revenue left after paying for variable production costs (wages, raw materials), but before paying interest or tax.
+    High operating margins suggest efficient operations and a strong business model; declining margins may indicate rising costs or pricing pressure.
+    """
     stock = _get_ticker(ticker_or_obj)
     info = stock.info
     try:
@@ -43,6 +51,10 @@ def operating_margin(ticker_or_obj) -> float:
     return float('nan')
 
 def roe_return_on_equity(ticker_or_obj) -> float:
+    """
+    Return on Equity (ROE): Indicates how effectively management is using shareholders' equity to generate profits.
+    High ROE (>15%) is a hallmark of quality businesses; low or volatile ROE may signal poor management or a risky business model.
+    """
     stock = _get_ticker(ticker_or_obj)
     info = stock.info
     roe = info.get('returnOnEquity')
@@ -65,6 +77,10 @@ def roe_return_on_equity(ticker_or_obj) -> float:
     return float('nan')
 
 def roa_return_on_assets(ticker_or_obj) -> float:
+    """
+    Return on Assets (ROA): Measures how efficiently a company uses its assets to generate net income.
+    High ROA means the company is generating more profit per dollar of assets; low ROA may indicate asset-heavy or inefficient operations.
+    """
     stock = _get_ticker(ticker_or_obj)
     info = stock.info
     roa = info.get('returnOnAssets')
@@ -87,6 +103,10 @@ def roa_return_on_assets(ticker_or_obj) -> float:
     return float('nan')
 
 def revenue_growth(ticker_or_obj, periods: int = 4) -> float:
+    """
+    Revenue Growth: Shows the rate at which a company's sales are increasing (or decreasing) over time.
+    Consistent, strong revenue growth is a sign of a healthy, expanding business; negative or volatile growth can be a red flag.
+    """
     stock = _get_ticker(ticker_or_obj)
     try:
         financials = stock.quarterly_financials
@@ -101,6 +121,10 @@ def revenue_growth(ticker_or_obj, periods: int = 4) -> float:
     return float('nan')
 
 def earnings_growth(ticker_or_obj, periods: int = 4) -> float:
+    """
+    Earnings Growth: Measures the rate at which a company's net income is growing.
+    Sustained earnings growth is a key driver of long-term stock performance; negative or inconsistent growth may indicate business challenges.
+    """
     stock = _get_ticker(ticker_or_obj)
     info = stock.info
     try:
@@ -117,7 +141,8 @@ def earnings_growth(ticker_or_obj, periods: int = 4) -> float:
 def eps_growth(ticker_or_obj) -> float:
     """
     EPS Growth: Year-over-year growth in earnings per share.
-    Returns percent growth as float, or nan if unavailable.
+    Indicates how quickly a company is increasing the profit allocated to each share of stock.
+    High EPS growth is attractive to investors; negative or flat EPS growth may signal trouble.
     """
     stock = _get_ticker(ticker_or_obj)
     eps_this_year = stock.info.get('trailingEps')

@@ -1,19 +1,13 @@
-import sys
-import os
 import yfinance as yf
 import pandas as pd
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
-
-from finance_assistant.price import stock_price, current_price, simple_moving_average, rsi
-from finance_assistant.info import company_info
-from finance_assistant.news import news_headlines
-from finance_assistant.valuation import pe_ratio
-from finance_assistant.health import debt_to_equity
-from finance_assistant.scoring import return_on_ebit, return_on_capital, roic_greenblatt, magic_formula_score
+from finance_assistant import stock_price, current_price, simple_moving_average, rsi, company_info, news_headlines, pe_ratio, debt_to_equity
+from finance_assistant import return_on_ebit, return_on_capital, roic_greenblatt, magic_formula_score
+from finance_assistant.fundamental.analytics.sector import calculate_sector_averages
+from finance_assistant.data_providers.yfinance.yfinance_provider import YFinanceProvider
 
 # Example ticker for testing
 TICKER = 'AAPL'
+provider = YFinanceProvider()
 
 def test_stock_price():
     print('Stock Price:', stock_price(TICKER))
@@ -51,6 +45,9 @@ def test_roic_greenblatt():
 def test_magic_formula_score():
     print('Magic Formula Score:', magic_formula_score(TICKER))
 
+def test_calculate_sector_averages():
+    print('Sector Averages:', calculate_sector_averages(TICKER, provider=provider))
+
 if __name__ == '__main__':
     # test_stock_price()
     # test_current_price()
@@ -63,3 +60,4 @@ if __name__ == '__main__':
     test_return_on_capital()
     test_roic_greenblatt()
     test_magic_formula_score()
+    test_calculate_sector_averages()

@@ -1,17 +1,17 @@
 import pytest
-import yfinance as yf
-import sys
-import os 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
-
-from finance_assistant.scoring import (
+from finance_assistant import (
     fundamental_score,
     return_on_ebit,
     return_on_capital,
     roic_greenblatt,
     magic_formula_score,
+    # All functions below are re-exported from __init__.py
+    stock_price, current_price, historical_data, simple_moving_average, rsi,
+    news_headlines, company_info, get_sector,
+    profit_margin, operating_margin, roe_return_on_equity, roa_return_on_assets, revenue_growth, earnings_growth, eps_growth,
+    pe_ratio, peg_ratio, price_to_book, eps_earnings_per_share,
+    debt_to_equity, current_ratio, quick_ratio, debt_to_assets
 )
-from finance_assistant import data, price, fundamentals, valuation, health, news, info
 
 TICKER = 'AAPL'
 
@@ -46,66 +46,61 @@ def test_magic_formula_score(ticker):
     assert 'ebit_ev' in val and 'roc' in val
 
 @pytest.mark.parametrize("ticker", [TICKER])
-def test_data_module(ticker):
-    # No public function in data.py to test
-    pass
-
-@pytest.mark.parametrize("ticker", [TICKER])
-def test_price_module(ticker):
-    s = price.stock_price(ticker)
+def test_stock_price(ticker):
+    s = stock_price(ticker)
     assert hasattr(s, 'index')
-    c = price.current_price(ticker)
+    c = current_price(ticker)
     assert isinstance(c, float)
-    h = price.historical_data(ticker)
+    h = historical_data(ticker)
     assert hasattr(h, 'empty')
 
 @pytest.mark.parametrize("ticker", [TICKER])
 def test_fundamentals_module(ticker):
-    pm = fundamentals.profit_margin(ticker)
+    pm = profit_margin(ticker)
     assert isinstance(pm, float)
-    om = fundamentals.operating_margin(ticker)
+    om = operating_margin(ticker)
     assert isinstance(om, float)
-    roe = fundamentals.roe_return_on_equity(ticker)
+    roe = roe_return_on_equity(ticker)
     assert isinstance(roe, float)
-    roa = fundamentals.roa_return_on_assets(ticker)
+    roa = roa_return_on_assets(ticker)
     assert isinstance(roa, float)
-    rev = fundamentals.revenue_growth(ticker)
+    rev = revenue_growth(ticker)
     assert isinstance(rev, float)
-    earn = fundamentals.earnings_growth(ticker)
+    earn = earnings_growth(ticker)
     assert isinstance(earn, float)
-    eps = fundamentals.eps_growth(ticker)
+    eps = eps_growth(ticker)
     assert isinstance(eps, float)
 
 @pytest.mark.parametrize("ticker", [TICKER])
 def test_valuation_module(ticker):
-    pe = valuation.pe_ratio(ticker)
+    pe = pe_ratio(ticker)
     assert isinstance(pe, float)
-    peg = valuation.peg_ratio(ticker)
+    peg = peg_ratio(ticker)
     assert isinstance(peg, float)
-    pb = valuation.price_to_book(ticker)
+    pb = price_to_book(ticker)
     assert isinstance(pb, float)
-    eps = valuation.eps_earnings_per_share(ticker)
+    eps = eps_earnings_per_share(ticker)
     assert isinstance(eps, float)
 
 @pytest.mark.parametrize("ticker", [TICKER])
 def test_health_module(ticker):
-    debt = health.debt_to_equity(ticker)
+    debt = debt_to_equity(ticker)
     assert isinstance(debt, float)
-    current = health.current_ratio(ticker)
+    current = current_ratio(ticker)
     assert isinstance(current, float)
-    quick = health.quick_ratio(ticker)
+    quick = quick_ratio(ticker)
     assert isinstance(quick, float)
-    dta = health.debt_to_assets(ticker)
+    dta = debt_to_assets(ticker)
     assert isinstance(dta, float)
 
 @pytest.mark.parametrize("ticker", [TICKER])
 def test_news_module(ticker):
-    headlines = news.news_headlines(ticker)
+    headlines = news_headlines(ticker)
     assert isinstance(headlines, list)
 
 @pytest.mark.parametrize("ticker", [TICKER])
 def test_info_module(ticker):
-    info_dict = info.company_info(ticker)
+    info_dict = company_info(ticker)
     assert isinstance(info_dict, dict)
-    sector = info.get_sector(ticker)
+    sector = get_sector(ticker)
     assert isinstance(sector, str)
