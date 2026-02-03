@@ -1,0 +1,342 @@
+📌 CLEAN PROMPT: DAILY CROSS-ASSET MACRO & RISK DIAGNOSTIC
+
+Role & Objective
+Act as a cross-asset macro strategist and market risk PM.
+Produce a decision-oriented, forward-looking market diagnostic with a weeks–months horizon, grounded in:
+
+The last 24 hours of data, news, and price action
+
+Context from 1-week, 1-month, and 1-year trends
+
+A cross-asset framework: equities, sectors, rates, FX, credit, commodities, and crypto
+
+Your goal is not just to describe markets, but to identify the dominant drivers, regime, risks, and portfolio implications.
+
+1. Signal Hierarchy (Start Here)
+
+Identify the 3–5 most important signals currently driving markets.
+
+For each signal:
+
+What happened in the last 24h?
+
+Is it new, accelerating, or fading?
+
+Why does it matter now?
+
+Conclude with:
+
+Overall confidence level in the current market read (High / Medium / Low)
+
+Key conflicting signals and what would resolve them
+
+2. Macro, Central Banks & Policy Transmission
+2.1 Central Banks
+
+Summarize the latest signals from:
+
+Fed (Powell, FOMC, dots)
+
+ECB, BoE, BoJ, PBOC (as relevant)
+
+Describe:
+
+Current stance (hawkish / dovish / neutral)
+
+Market-implied rate path vs official guidance
+
+Key macro data in the last 24h (inflation, jobs, PMIs, growth) vs expectations
+
+2.2 Policy Transmission (Critical)
+
+Assess whether policy is actually biting:
+
+Financial conditions (credit availability, lending standards)
+
+Housing and capex sensitivity
+
+Bank and non-bank credit creation
+
+State whether policy is:
+
+Still tightening
+
+Neutralized
+
+Becoming stimulative
+
+3. Geopolitics & Policy Risk
+
+Identify current geopolitical or policy risks that matter for markets:
+
+Conflicts, elections, sanctions, trade disputes, regulatory shocks
+
+Explain:
+
+Transmission channels (energy, defense, food, FX, credit)
+
+Where risk premia are visible (oil, gold, vol, spreads)
+
+Classify geopolitical risk as:
+
+Increasing / Stable / Decreasing
+
+4. Market Structure, Liquidity & Sentiment
+4.1 Liquidity & Stress
+
+Evaluate:
+
+VIX (level + 1W/1M trend)
+
+Credit spreads (IG, HY, EM)
+
+Funding or Treasury market stress (if any)
+
+Conclude:
+
+Liquidity: Loose / Normal / Tight
+
+Trend: Improving or Deteriorating
+
+4.2 Sentiment & Positioning
+
+Analyze:
+
+Put/Call ratios
+
+Market breadth (A/D, % above 50/200 DMA)
+
+Fund flows (equities, bonds, money markets)
+
+Label sentiment:
+Fearful / Cautious / Neutral / Complacent / Euphoric
+
+4.3 Retail vs Institutional Flows
+
+Where retail is chasing vs where institutions are rotating
+
+Highlight divergences and what they typically imply
+
+5. Equities: Indices, Breadth & Factors
+5.1 Major Indices
+
+For major global indices:
+
+24h move + 1W / 1M / 1Y trend
+
+Broad-based vs narrow leadership
+
+US vs ex-US vs EM relative performance
+
+5.2 Breadth & Concentration
+
+Assess:
+
+Breadth vs index performance
+
+Mega-cap concentration risk
+
+State clearly:
+
+Healthy participation or masked fragility?
+
+5.3 Factor & Regime Analysis
+
+Evaluate:
+
+Momentum, Growth, Value, Quality, Low Vol, Size
+
+Infer:
+
+Risk-on vs risk-off
+
+Momentum-driven vs mean-reversion regime
+
+Cycle phase (early / mid / late / slowdown)
+
+6. Sectors & Cyclicality
+6.1 Sector Performance
+
+For major sectors:
+
+24h / 1W / 1M / YTD performance
+
+Relative vs market
+
+Key drivers
+
+6.2 Key Subsector Focus (Only Where Relevant)
+
+Examples:
+
+Semis vs software (AI capex cycle)
+
+Energy (OPEC, geopolitics, inventories)
+
+Financials (curve, credit risk, deposits)
+
+Defense (geopolitics)
+
+6.3 Cyclical vs Defensive Earnings
+
+Compare:
+
+EPS growth and revisions (cyclicals vs defensives)
+
+State:
+
+What this implies for economic momentum
+
+7. Earnings, Valuation & Quality
+7.1 Earnings Momentum
+
+Beat/miss trends
+
+Guidance tone
+
+Revision breadth
+
+Is earnings momentum:
+
+Broadening or narrowing?
+
+Improving or deteriorating?
+
+7.2 Valuations
+
+Assess:
+
+Forward P/E vs history
+
+Earnings yield vs 10Y yields
+
+Sector relative valuations
+
+Identify:
+
+Expensive / Fair / Cheap areas
+
+7.3 Margins & Quality
+
+Comment on:
+
+Margin trends
+
+Free cash flow vs earnings
+
+Cost pressures (wages, inputs, rates)
+
+8. Rates, Fixed Income & Credit
+8.1 Yield Curve
+
+Current yields (2Y, 10Y, 30Y) + trend
+
+Curve shape and changes
+
+Interpret:
+
+Growth, inflation, and recession signals
+
+8.2 Credit & Maturity Risk
+
+IG, HY, EM spread trends
+
+Debt maturity wall and refinancing conditions
+
+Banking system health (if relevant)
+
+9. Commodities, FX & Crypto
+9.1 Commodities
+
+Energy, gold, industrial metals
+
+Trend + macro signal (growth, inflation, geopolitics)
+
+9.2 FX
+
+DXY trend
+
+Major FX vs USD (policy differentials, carry)
+
+EM FX stress or carry signals
+
+9.3 Crypto
+
+BTC / ETH behavior
+
+Correlation with risk assets
+
+Structural vs speculative drivers
+
+10. Asymmetry, Scenarios & Key Levels
+10.1 Asymmetry & Crowding
+
+Identify:
+
+Crowded trades
+
+Upside vs downside skew
+
+Assets vulnerable to fat-tail risk
+
+10.2 Scenario Matrix (1–3 Months)
+
+Base case (with probability)
+
+Upside scenario (trigger + impact)
+
+Downside scenario (trigger + impact)
+
+10.3 Key Levels & Triggers
+
+List:
+
+Index, yield, spread, or commodity levels that would:
+
+Confirm the thesis
+
+Invalidate the thesis
+
+11. Portfolio Implications (Medium-Term)
+
+Provide clear, actionable takeaways:
+
+Overall stance: Bullish / Neutral / Bearish (with conviction level)
+
+Overweights / Underweights (sectors, styles, regions)
+
+Equities vs bonds vs cash vs commodities
+
+Cyclicals vs defensives
+
+Value vs growth
+
+US vs non-US vs EM
+
+Risk Management
+
+Suggested hedges (vol, gold, defensives, cash)
+
+Main downside risks to monitor
+
+Events or data that could force rapid repositioning
+
+Output Guidelines
+
+Clear structure and concise paragraphs
+
+Always connect data → driver → implication
+
+Explicitly state uncertainty and contradictions
+
+Focus on what changes positioning, not just what happened
+
+If you want next:
+
+A compressed “10-minute morning version”
+
+A weekly strategy committee version
+
+Or an automated checklist/scoring system
+
+Just say the word.

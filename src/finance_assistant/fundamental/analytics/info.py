@@ -1,8 +1,11 @@
 from .data import _get_ticker
 
-def company_info(ticker_or_obj) -> dict:
+def _get_info(ticker_or_obj):
     stock = _get_ticker(ticker_or_obj)
-    info = stock.info
+    return stock.info
+
+def company_info(ticker_or_obj) -> dict:
+    info = _get_info(ticker_or_obj)
     return {
         'name': info.get('shortName', 'N/A'),
         'sector': info.get('sector', 'N/A'),
@@ -10,5 +13,5 @@ def company_info(ticker_or_obj) -> dict:
     }
 
 def get_sector(ticker_or_obj) -> str:
-    stock = _get_ticker(ticker_or_obj)
-    return stock.info.get('sector', 'N/A')
+    info = _get_info(ticker_or_obj)
+    return info.get('sector', 'N/A')

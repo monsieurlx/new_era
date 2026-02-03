@@ -33,6 +33,24 @@ def get_stock_metrics(ticker: str, provider: DataProviderInterface = None) -> Di
 # ============================================================================
 # SECTOR-WIDE AVERAGES (Provider-based)
 # ============================================================================
+def _aggregate_metrics(df: pd.DataFrame, metrics_to_analyze: List[str]) -> Dict:
+    results = {}
+    for metric in metrics_to_analyze:
+        valid_values = df[metric].dropna()
+        if len(valid_values) > 0:
+            results[metric] = {
+                'average': float(valid_values.mean()),
+                'median': float(valid_values.median()),
+                'min': float(valid_values.min()),
+                'max': float(valid_values.max()),
+                'std_dev': float(valid_values.std()),
+                'valid_count': len(valid_values),
+                'missing_count': len(df) - len(valid_values)
+            }
+        else:
+            results[metric] = {'error': 'No data available'}
+    return results
+
 def calculate_sector_averages(sector_name: str, n: int = 20, provider: DataProviderInterface = None) -> Dict:
     """Calculate average metrics for entire sector using provider"""
     if provider is None:
@@ -64,20 +82,7 @@ def calculate_sector_averages(sector_name: str, n: int = 20, provider: DataProvi
         'pe_ratio', 'peg_ratio', 'profit_margin', 'roe', 'roa',
         'debt_to_equity', 'current_ratio', 'dividend_yield', 'eps'
     ]
-    for metric in metrics_to_analyze:
-        valid_values = df[metric].dropna()
-        if len(valid_values) > 0:
-            results[metric] = {
-                'average': float(valid_values.mean()),
-                'median': float(valid_values.median()),
-                'min': float(valid_values.min()),
-                'max': float(valid_values.max()),
-                'std_dev': float(valid_values.std()),
-                'valid_count': len(valid_values),
-                'missing_count': len(df) - len(valid_values)
-            }
-        else:
-            results[metric] = {'error': 'No data available'}
+    results.update(_aggregate_metrics(df, metrics_to_analyze))
     return results
 
 # ============================================================================
@@ -145,20 +150,7 @@ def calculate_industry_averages(industry_name: str, n: int = 20, provider: DataP
         'pe_ratio', 'peg_ratio', 'profit_margin', 'roe', 'roa',
         'debt_to_equity', 'current_ratio', 'dividend_yield', 'eps'
     ]
-    for metric in metrics_to_analyze:
-        valid_values = df[metric].dropna()
-        if len(valid_values) > 0:
-            results[metric] = {
-                'average': float(valid_values.mean()),
-                'median': float(valid_values.median()),
-                'min': float(valid_values.min()),
-                'max': float(valid_values.max()),
-                'std_dev': float(valid_values.std()),
-                'valid_count': len(valid_values),
-                'missing_count': len(df) - len(valid_values)
-            }
-        else:
-            results[metric] = {'error': 'No data available'}
+    results.update(_aggregate_metrics(df, metrics_to_analyze))
     return results
 
 # ============================================================================

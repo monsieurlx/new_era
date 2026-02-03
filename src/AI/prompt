@@ -1,0 +1,206 @@
+ULTIMATE PROMPT: FULL-STACK, MULTI-ASSET, FORWARD-LOOKING MARKET DIAGNOSTIC
+Act as a cross-asset macro strategist and market risk PM.
+Your task is to produce a comprehensive, medium-term oriented (weeks–months) evaluation of the current global market environment, based on:
+The last 24 hours of information and price action
+Put into context with 1-week, 1-month, and 1-year trends
+Across equities, sectors, commodities, FX, rates, credit, and crypto
+Focus on what is happening now, how it fits into recent and longer trends, and what it implies for medium-term portfolio positioning and risk management.
+1. Macro, Policy & Geopolitics
+1.1 Macro & Central Banks
+Summarize the latest signals from:
+Federal Reserve (Powell speeches, FOMC decisions, dot plot implications)
+ECB, BoE, BoJ, PBOC and other major central banks
+Describe:
+Current stance (hawkish/dovish/neutral)
+Market-implied path of rates vs. official guidance
+Key macro data released in last 24h (inflation, jobs, PMIs, growth) vs. expectations
+Place these in context of 1W/1M/1Y trends in:
+CPI/Core CPI/PPI
+Employment data
+GDP growth expectations
+Real rates and breakeven inflation
+1.2 Global Geopolitics & Policy Risk
+Identify major geopolitical tensions/events (wars, conflicts, sanctions, elections, trade disputes, regulatory shocks) that are currently relevant to markets.
+Explain through which channels they affect:
+Energy, metals, food
+Defense/industrial companies
+FX and bond markets
+Indicate whether geopolitical risk premia are:
+Increasing, stable, or decreasing
+And where they are most visible (oil, gas, gold, credit spreads, vol indices, specific regions).
+2. Market Structure, Liquidity & Sentiment
+2.1 Market Liquidity & Stress
+Evaluate:
+VIX level and 1W/1M trend
+Credit spreads (IG OAS, HY OAS, EM credit)
+Liquidity indicators: bid/ask spreads, Treasury market liquidity, stress in funding/repo if any
+State whether liquidity conditions are:
+Loose/normal/tight
+Improving or deteriorating
+2.2 Sentiment & Positioning
+Analyze:
+Put/Call ratios (index and single-stock where relevant)
+Market breadth (advance/decline, % of stocks above 50/200 DMA, new highs vs. lows)
+Fund flows: equity vs. bonds vs. money-market funds
+Qualitatively label sentiment:
+Fearful / cautious / neutral / complacent / euphoric
+2.3 Retail vs Institutional Flows
+Distinguish:
+Retail flows vs institutional flows (direction and magnitude)
+Which sectors/styles retail is chasing vs where institutions are rotating
+Highlight any divergence and explain what it typically implies for medium-term reversals or continuation.
+3. Equity Indices, Factors & Market Regime
+3.1 Major Indices & Global Equities
+For S&P 500, Nasdaq 100, Dow, Russell 2000, EuroStoxx, Nikkei, key EM indices:
+24h performance, plus 1W/1M/1Y trend
+Leadership/laggards (growth vs value, large vs small, US vs ex-US)
+Comment on:
+Whether recent index moves are broad-based or driven by a few mega-caps
+Any notable decoupling or recoupling between regions
+3.2 Market Breadth & Concentration
+Assess:
+Breadth (how many stocks drive returns)
+Concentration risk (weight and impact of “Magnificent 7” or similar mega-caps)
+State if:
+Index strength is supported by healthy breadth or masked by narrow leadership.
+3.3 Factor & Regime Analysis
+Evaluate performance and trend of:
+Momentum, Value, Quality, Low Volatility, Growth, Size factors
+Infer:
+What factor leadership says about risk appetite and regime (e.g., late-cycle, early-cycle, risk-on, risk-off)
+Indicate:
+Whether the trading regime is currently more momentum-driven or mean-reversion-driven.
+4. Sectors, Subsectors & Cyclical vs Defensive Balance
+4.1 Sector Performance Matrix
+For major sectors (Tech, Communication Services, Consumer Discretionary, Consumer Staples, Industrials, Defense/Aerospace, Energy, Financials, Real Estate, Healthcare, Utilities, Materials):
+Provide:
+24h, 1W, 1M, YTD performance
+Relative performance vs. the broad market
+Explain key drivers for notable outperformers/underperformers.
+4.2 Subsector Deep-Dives (where relevant)
+Defense & Aerospace (LMT, RTX, NOC, BA etc.) – link to geopolitical tensions
+Energy subsectors: integrated oil, E&P, services, renewables – link to oil/gas prices, OPEC decisions, geopolitics
+Financials: regional banks vs large money-center banks – link to yield curve, credit risk, deposit stability
+Tech: semiconductors vs software vs mega-cap platforms – link to AI capex, PC/smartphone cycle, cloud demand
+4.3 Cyclical vs Defensive Earnings Leadership
+Compare:
+Earnings growth and revisions for cyclical sectors (industrials, consumer discretionary, materials, semis, financials) vs defensive sectors (staples, healthcare, utilities).
+State:
+Whether cyclical EPS growth is leading or lagging defensives
+What that implies about the economic cycle (accelerating, stable, decelerating).
+5. Earnings, Valuations & Quality
+5.1 Earnings Momentum & Revisions
+Summarize:
+Current earnings season tone (beat/miss rates, guidance trends)
+Earnings revision breadth (% of upward vs downward revisions)
+Sector-level revision leaders/laggards
+Explain:
+Whether earnings momentum is broad-based or concentrated, and whether it is improving or deteriorating.
+5.2 Valuation Overview
+For the main indices and principal sectors, provide:
+Forward P/E vs 5/10-year historical average
+P/B and EV/EBITDA where relevant
+Earnings yield vs risk-free rate (e.g., vs 10Y UST)
+PEG where useful (for high-growth sectors)
+Conclude:
+Which areas look expensive, fair, or cheap on a relative and historical basis.
+5.3 Earnings Quality & Margins
+Comment on:
+Net and operating margin trends vs history
+Free cash flow generation vs accounting earnings
+Pricing power (ability to pass on costs)
+Any visible margin pressure from wages, input costs, rates.
+6. Fixed Income, Rates & Credit
+6.1 Rates & Yield Curve
+Describe:
+Current level and 1W/1M/1Y change in key yields (2Y, 10Y, 30Y UST, and key global sovereigns)
+Yield curve shape (normal, flat, inverted) and changes
+Interpret:
+What the curve implies about growth/inflation expectations and recession risk.
+6.2 Credit Markets & Debt Maturity Wall
+Analyze:
+IG and HY spreads and their recent trends
+EM credit risk premia
+Discuss:
+The corporate and, where relevant, sovereign debt maturity wall (how much needs refinancing in the near term)
+Refinancing conditions and risk (are spreads widening, issuers shut out of market, covenant pressure?)
+Assess:
+Banking system health: capital ratios, NPL trends (if notable), deposit stability indications.
+7. Commodities & Raw Materials
+7.1 Energy Complex
+For WTI, Brent, and major gas benchmarks:
+24h, 1W, 1M, 1Y performance
+Key drivers (OPEC+ policy, geopolitical risk, demand expectations, inventory data)
+Connect:
+Energy price moves to sector implications (energy equities, transportation, chemicals, inflation expectations).
+7.2 Precious Metals
+Gold and silver:
+Price action and trend (24h, 1W, 1M, 1Y)
+Role as safe-haven vs real rates and dollar
+Explain:
+Whether current moves are more driven by risk aversion, real rates, or currency dynamics.
+7.3 Industrial Metals & Other Commodities
+Copper, aluminum, iron ore, lithium, etc.:
+What their price trends say about global growth, China demand, green/EV demand.
+Highlight:
+Any meaningful divergences (e.g., copper strong while equities weak, or vice versa).
+8. FX & Crypto
+8.1 FX (Majors & EM)
+Summarize:
+DXY trend and drivers
+EUR, JPY, GBP, CHF vs USD – policy differential, carry, risk sentiment
+Key EM FX moves (stress signals or carry trades)
+Explain:
+Whether FX markets confirm or contradict the story seen in equities and rates.
+8.2 Crypto
+For Bitcoin, Ethereum and any major altcoins if relevant:
+Recent performance and volatility
+Correlation vs risk assets (equities, tech) – is crypto behaving like high beta risk, digital gold, or something else right now?
+Mention:
+Any regulatory, ETF, or institutional adoption news affecting the current behavior.
+9. Volatility, Options & Regime Shifts
+9.1 Volatility Term Structure & Skew
+Assess:
+VIX level vs 1W/1M/1Y
+Term structure (contango, flat, backwardation)
+Skew (put-call skew, tail hedging cost)
+Explain:
+What the options market is pricing in for near-term vs medium-term risk.
+9.2 Options Positioning
+Identify:
+Heavy put buying (hedging) or call buying (speculation/FOMO)
+Any notable positioning around key indices/mega-caps
+Comment:
+Whether options flow suggests institutions are hedging, levering up, or staying neutral.
+10. Synthesis, Correlations & Key Narratives
+10.1 Cross-Asset Correlations
+Summarize:
+How equities, bonds, commodities, FX, and crypto are moving relative to each other.
+Highlight:
+Any unusual or changing correlations (e.g., stocks and bonds falling together, gold rising with risk-on assets).
+10.2 Dominant Market Narratives
+Distill the main current narratives (e.g., soft landing vs hard landing, AI-driven productivity boom, stagflation risk, geopolitical fragmentation).
+Evaluate:
+Whether price action supports or contradicts these narratives.
+10.3 Regime Classification
+Clearly label the current environment as something like:
+Risk-on / Risk-off / Transition
+Early-cycle / Mid-cycle / Late-cycle / Recessionary
+Inflationary / Disinflationary / Reflationary / Deflation scare
+11. Portfolio Implications (Medium-Term)
+Provide a concise but concrete set of portfolio takeaways for a diversified medium-term investor:
+Overall stance: Bullish / Neutral / Bearish, with a conviction level.
+Sectors/styles to overweight and underweight, with justification.
+Views on:
+Equity vs bonds vs cash vs commodities
+Cyclicals vs defensives
+Value vs growth
+US vs non-US vs EM
+Hedges and risk management:
+What to consider as hedges (e.g., volatility, gold, defensives, cash, specific options structures)
+Main downside scenarios and triggers to watch (data, events, levels on key indices or spreads).
+Output Style
+Use clear structure with headings and short paragraphs.
+Be analytical, not just descriptive: always connect data → driver → implication for portfolios.
+Be explicit where signals are contradictory or uncertain, and state what would confirm/deny the current thesis.
+
