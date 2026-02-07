@@ -41,7 +41,8 @@ dependencies = [
     "yfinance",
     "colorama",
     "streamlit",
-    "lxml"
+    "lxml",
+    "perplexityai"
 ]
 
 [project.optional-dependencies]
