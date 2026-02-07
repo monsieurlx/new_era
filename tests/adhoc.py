@@ -5,9 +5,9 @@ import pandas as pd
 import requests
 from io import StringIO
 
-from finance_assistant.fundamental.analytics.data import _get_ticker
-from finance_assistant.fundamental.analytics.ticker import *
-from finance_assistant.fundamental.analytics.sector import calculate_sector_averages
+from finance_assistant.providers.yfinance.data import _get_ticker
+from finance_assistant.providers.yfinance.ticker import *
+from finance_assistant.providers.yfinance.sector import calculate_sector_averages
 
 
 def get_index_tickers(index):

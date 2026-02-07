@@ -1,4 +1,4 @@
-from finance_assistant.data_providers.yfinance.yfinance_provider import YFinanceProvider
+from finance_assistant.providers.yfinance.yfinance_provider import YFinanceProvider
 
 def test_interface():
     provider = YFinanceProvider()

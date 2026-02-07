@@ -19,10 +19,7 @@ keywords = [
     "fastmcp", 
     "model-context-protocol",
     "ai",
-    "llm",
-    "claude",
-    "anthropic",
-    "tutorial"
+    "llm"
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -42,7 +39,12 @@ dependencies = [
     "colorama",
     "streamlit",
     "lxml",
-    "perplexityai"
+    "perplexityai",
+    "claude",
+    "anthropic",
+    "lightweight-charts",
+    "yfinance",
+    "alpha_vantage"
 ]
 
 [project.optional-dependencies]

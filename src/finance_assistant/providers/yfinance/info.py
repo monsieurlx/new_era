@@ -1,4 +1,4 @@
-from ..fundamental.analytics.data import _get_ticker
+from .data import _get_ticker
 
 def _get_info(ticker_or_obj):
     stock = _get_ticker(ticker_or_obj)

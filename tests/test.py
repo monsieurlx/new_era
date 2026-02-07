@@ -7,10 +7,11 @@ import os
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from dotenv import load_dotenv
+import sys
 
 from finance_assistant.providers.models import FinancialMetrics
 from finance_assistant.providers.base_provider import DataProvider
-from finance_assistant.providers.yfinance import YFinanceProvider
+from finance_assistant.providers.yfinance.yfinance_provider import YFinanceProvider
 from finance_assistant.providers.alpha_vantage.fundamental import AlphaVantageProvider
 from finance_assistant.providers.eodhd.fundamental import EODHDProvider
 from finance_assistant.providers.fmp.fundamental import FMPProvider
@@ -227,26 +228,26 @@ if __name__ == "__main__":
     screener_query("GOOGL")
     
     # Example 2: Custom configuration with API keys
-    print("\n### EXAMPLE 2: Custom Configuration ###")
-    custom_config = {
-        "preferred_provider": "fmp",  # Use FMP as primary
-        "fallback_providers": ["yfinance"], #, "alpha_vantage", "eodhd"
-        "enable_perplexity": True,
-        "api_keys": {
-            "alpha_vantage": os.getenv("ALPHA_VANTAGE_API_KEY"),
-            "eodhd": os.getenv("EODHD_API_KEY"),
-            "fmp": os.getenv("FMP_API_KEY"),
-            "perplexity": os.getenv("PERPLEXITY_API_KEY"),
-        }
-    }
-    screener_query("AAPL", custom_config)
+    # print("\n### EXAMPLE 2: Custom Configuration ###")
+    # custom_config = {
+    #     "preferred_provider": "fmp",  # Use FMP as primary
+    #     "fallback_providers": ["yfinance"], #, "alpha_vantage", "eodhd"
+    #     "enable_perplexity": True,
+    #     "api_keys": {
+    #         "alpha_vantage": os.getenv("ALPHA_VANTAGE_API_KEY"),
+    #         "eodhd": os.getenv("EODHD_API_KEY"),
+    #         "fmp": os.getenv("FMP_API_KEY"),
+    #         "perplexity": os.getenv("PERPLEXITY_API_KEY"),
+    #     }
+    # }
+    # screener_query("AAPL", custom_config)
     
     # Example 3: Compare data from all providers
-    print("\n### EXAMPLE 3: Compare All Providers ###")
-    screener = MultiSourceScreener(custom_config)
-    comparison = screener.compare_providers("MSFT")
+    # print("\n### EXAMPLE 3: Compare All Providers ###")
+    # screener = MultiSourceScreener(custom_config)
+    # comparison = screener.compare_providers("MSFT")
     
-    # Print P/E ratios from different sources
-    print("\nP/E Ratio Comparison:")
-    for provider_name, metrics in comparison.items():
-        print(f"{provider_name:25} P/E: {metrics.pe_ratio:.2f}" if metrics.pe_ratio else f"{provider_name:25} P/E: N/A")
+    # # Print P/E ratios from different sources
+    # print("\nP/E Ratio Comparison:")
+    # for provider_name, metrics in comparison.items():
+    #     print(f"{provider_name:25} P/E: {metrics.pe_ratio:.2f}" if metrics.pe_ratio else f"{provider_name:25} P/E: N/A")

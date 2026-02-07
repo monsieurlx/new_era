@@ -1,5 +1,5 @@
 import pytest
-from finance_assistant import (
+from finance_assistant.providers.yfinance.scoring import (
     fundamental_score,
     return_on_ebit,
     return_on_capital,

@@ -1,6 +1,5 @@
 import pytest
-from finance_assistant import fundamental_score
-from finance_assistant.fundamental.analytics.scoring import (
+from finance_assistant.providers.yfinance.scoring import fundamental_score, return_on_ebit, return_on_capital, roic_greenblatt, magic_formula_score
     get_global_index_tickers,
     get_sector_peers_api,
     compute_sector_averages_api,

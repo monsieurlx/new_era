@@ -1,4 +1,4 @@
-from ..fundamental.analytics.data import _get_ticker
+from .data import _get_ticker
 import pandas as pd
 
 def pe_ratio(ticker_or_obj) -> float:

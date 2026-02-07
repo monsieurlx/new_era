@@ -1,9 +1,13 @@
 import yfinance as yf
 import pandas as pd
-from finance_assistant import stock_price, current_price, simple_moving_average, rsi, company_info, news_headlines, pe_ratio, debt_to_equity
-from finance_assistant import return_on_ebit, return_on_capital, roic_greenblatt, magic_formula_score
-from finance_assistant.fundamental.analytics.sector import calculate_sector_averages
-from finance_assistant.data_providers.yfinance.yfinance_provider import YFinanceProvider
+from finance_assistant.providers.yfinance.price import stock_price, current_price, simple_moving_average, rsi
+from finance_assistant.providers.yfinance.info import company_info
+from finance_assistant.providers.yfinance.news import news_headlines
+from finance_assistant.providers.yfinance.valuation import pe_ratio
+from finance_assistant.providers.yfinance.health import debt_to_equity
+from finance_assistant.providers.yfinance.scoring import return_on_ebit, return_on_capital, roic_greenblatt, magic_formula_score
+from finance_assistant.providers.yfinance.sector import calculate_sector_averages
+from finance_assistant.providers.yfinance.yfinance_provider import YFinanceProvider
 
 # Example ticker for testing
 TICKER = 'AAPL'

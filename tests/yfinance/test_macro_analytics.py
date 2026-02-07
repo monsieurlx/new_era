@@ -1,5 +1,5 @@
 import pytest
-from finance_assistant.macro.analytics import get_misery_index, get_dollar_index, get_cpi, get_unemployment_rate, get_gdp_growth
+from finance_assistant.providers.yfinance.macro import get_misery_index, get_dollar_index, get_cpi, get_unemployment_rate, get_gdp_growth
 
 # Test the macroeconomic index functions for basic data retrieval and structure
 

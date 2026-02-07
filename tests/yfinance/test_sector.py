@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
-from finance_assistant.fundamental.analytics.sector import calculate_sector_averages
-from finance_assistant.data_providers.yfinance.yfinance_provider import YFinanceProvider
+from finance_assistant.providers.yfinance.sector import calculate_sector_averages
+from finance_assistant.providers.yfinance.yfinance_provider import YFinanceProvider
 
 provider = YFinanceProvider()
 
