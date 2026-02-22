@@ -38,13 +38,15 @@ dependencies = [
     "yfinance",
     "colorama",
     "streamlit",
+    "ib_async",
     "lxml",
     "perplexityai",
     "claude",
     "anthropic",
     "lightweight-charts",
     "yfinance",
-    "alpha_vantage"
+    # "alpha_vantage",
+    "pytz"
 ]
 
 [project.optional-dependencies]

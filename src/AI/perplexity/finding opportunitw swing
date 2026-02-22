@@ -1,0 +1,587 @@
+1. Define Your Trading Universe
+Start with a manageable set of liquid assets. For US equities, common choices are:
+
+S&P 500 (SPY components)
+
+NASDAQ 100 (QQQ components)
+
+High‑volume ETFs (e.g., sector ETFs, SPY, QQQ)
+
+Stocks with average daily volume > 1M and price > $5 (avoid illiquid penny stocks)
+
+You can also screen crypto (e.g., top 20 by market cap) or forex majors, but I’ll focus on equities here.
+
+2. Key Screening Criteria for Swing Trading
+Apply filters that identify assets with enough movement, clear trends, and good liquidity.
+
+Criteria	Why It Matters	Typical Threshold
+Liquidity	Ensures you can enter/exit without large slippage.	Avg volume > 1M shares; price > $5
+Volatility	Swing trades need price movement to capture profits. Use Average True Range (ATR) as % of price.	ATR% > 2–3% (depends on market conditions)
+Momentum	Look for stocks in an uptrend or breaking out.	Price > 50‑day SMA; 50‑day SMA > 200‑day SMA
+Volume Surge	Confirms institutional interest and breakout validity.	Current volume > 1.5× average volume
+Relative Strength	Stocks outperforming the broader market.	RS rating > 70 (or price vs. SPY)
+Technical Setup	Specific patterns like flag, cup‑and‑handle, or consolidation breakout.	Can be coded (e.g., highest high in N days)
+Fundamental Catalyst (optional)	Earnings growth, positive revisions, or sector tailwinds increase probability.	EPS growth > 0, recent earnings beat
+3. Data Collection
+You’ll need historical daily OHLCV data. Free Python libraries:
+
+yfinance – easy, free, covers stocks, ETFs, some crypto.
+
+pandas_datareader – alternative sources.
+
+Alpha Vantage / polygon.io – require API keys but offer more data.
+
+For this guide, I’ll use yfinance.
+
+4. Indicator Calculation
+From the daily data, compute:
+
+SMA 50, SMA 200 – trend direction.
+
+RSI (14) – overbought/oversold (swing traders often prefer 40–70).
+
+ATR (14) – volatility measure.
+
+Volume ratio – (latest volume / 20‑day avg volume).
+
+Highest high / lowest low over N days – detect breakouts.
+
+5. Scoring / Ranking System
+Combine the filters into a composite score. Example:
+
++1 point if price > SMA50
+
++1 point if SMA50 > SMA200
+
++1 point if ATR% > 2.5%
+
++1 point if volume ratio > 1.5
+
++1 point if RSI between 40 and 70 (not extreme)
+
++1 point if stock is in top 20% of sector performance (optional)
+
+Assets with the highest score (e.g., 4–6 points) become your watchlist.
+
+
+The best method is a rules‑based weekly scan + daily refresh that ranks all liquid stocks by trend quality, volatility, volume, relative strength, and a small set of repeatable chart patterns (breakout or pullback), then only takes names with clean risk‑to‑reward.
+
+Below is a blueprint you can translate almost 1:1 into Python or an AI pipeline.
+
+High‑level workflow
+Weekly (weekend): run a full scan on your universe to build a watchlist for the coming week or month.
+
+Daily: update data, re‑score, and only consider entries when price action actually triggers your setup (breakout, bounce, etc.).
+
+For each symbol, compute features, filter aggressively, then rank remaining tickers by a composite score; trade only the top few that also have clean price structure.
+
+1. Universe and liquidity filters
+These are hard filters you apply before any “smart” logic.
+
+Region/exchange: start with US‑listed common stocks (no ETFs/OTC) or whatever primary market you focus on.
+
+Price: ignore very low‑priced names to reduce spread/slippage issues (e.g., close between 5 and 150).
+
+Liquidity:
+
+Average daily volume over last 20–60 days ≥ 1–2M shares (you can go higher if you want ultra‑liquid).
+
+Optional: filter by dollar volume (close × volume) to ensure enough turnover (e.g., > 10–20M USD/day).
+
+Implementation: compute rolling mean of volume and dollar volume; drop everything that fails.
+
+2. Timeframe and trend regime
+Use multi‑timeframe logic: weekly for primary trend, daily for swing entries.
+
+Weekly trend:
+
+Compute 10‑week and 30‑week SMAs on weekly closes.
+
+Require price > 30‑week SMA and 10‑week SMA ≥ 30‑week SMA for long setups (mirror for shorts).
+
+Daily trend:
+
+Compute 20‑day and 50‑day SMAs or EMAs.
+
+For long bias: close > 20‑SMA > 50‑SMA, and optionally 50‑SMA > 200‑SMA to avoid counter‑trend trades.
+
+This ensures you only scan for entries in names already trending in your direction.
+
+3. Momentum and volatility filters
+You want “strong but not blown out” moves with enough range for swings.
+
+Momentum (RSI):
+
+Compute 14‑day RSI.
+
+For early uptrend entries, keep RSI between ~50 and 65: above neutral, below overbought.
+
+Volatility (ATR):
+
+Compute ATR(20) and ATR%(20) = ATR(20) / close.
+
+Choose a band compatible with your style and account (e.g., ATR% between 2% and 8% for swing; you can tighten to 3–6%).
+
+Too low = not enough move; too high = unmanageable risk with a small account.
+
+Implementation: keep only tickers where ATR% is inside your desired band and RSI is in your “sweet spot”.
+
+4. Volume and relative strength
+These tell you where money is actually flowing.
+
+Baseline volume filters already applied; now look for:
+
+Volume expansion: today’s or recent 1–3‑day volume > 1.5–2× average 20‑day volume (relative volume).
+
+For fresh breakouts, insist on above‑average volume on the breakout bar.
+
+Relative strength:
+
+Compute performance vs benchmark over 1, 3, and 6 months (e.g., stock return − SPY return).
+
+Keep names in top X% (e.g., top 20%) for at least one of those windows and not in the bottom group in the others.
+
+This pushes your list toward leaders rather than laggards.
+
+5. Setup patterns to algorithmically detect
+Once you have liquid, trending, strong‑RS names, detect specific swing setups.
+
+A. Breakout from consolidation
+Backstory: widely used swing pattern in scanners (breaks of ranges/MAs with volume).
+
+Rules you can code:
+
+Identify a recent base: last N days (e.g., 10–40) where:
+
+Price stays within a % band (max(high) / min(low) − 1 ≤ 10–15%),
+
+Volume during base is at or below 20‑day average (quiet consolidation).
+
+Breakout trigger day:
+
+Today’s high or close > max(high) of base by at least 0.5–1%,
+
+Volume ≥ 1.5–2× base average.
+
+Features to compute:
+
+Base length, base tightness, breakout distance above base, breakout volume multiple.
+
+B. Pullback to moving average (“buy the dip in an uptrend”)
+This is a classic “Holy Grail” / mean‑reversion‑within‑trend setup.
+
+Trend pre‑condition:
+
+Last 20–40 days: price above 50‑SMA, 50‑SMA sloping up, meets trend rules in section 2.
+
+Pullback definition:
+
+Close moves down 3–10% off recent swing high,
+
+Low comes within X% of 20‑day EMA or touches it (e.g., abs(close − EMA20)/EMA20 ≤ 2%).
+​
+​
+
+RSI drops toward 45–55 but stays above 40 (not full breakdown).
+
+Entry trigger:
+
+Bullish reversal candle near that MA (e.g., close > prior day high, or strong intraday reclaim),
+
+Volume on reversal bar ≥ 1–1.5× 20‑day average.
+
+You can encode candle triggers simply as “today_close > max(prior_n_highs)” or “today_close > yesterday_high”.
+
+6. Event and catalyst filters
+For a weekly/monthly swing, decide how you treat events.
+
+Earnings:
+
+Most systematic swing traders either:
+
+Exclude names with earnings inside next 5–10 trading days, or
+
+Trade them smaller and explicitly tag as “earnings risk.”
+
+Major news:
+
+Optional: detect large gaps or extreme volume spikes (> 3–4× avg); sometimes you may exclude these from “normal” swing list and treat them as special situations.
+
+Implementation: use an earnings calendar API; add days_to_earnings as a feature; filter or down‑weight.
+
+7. Risk and position‑sizing constraints (for scoring)
+Even in a screener, you should reject setups that cannot be traded safely with your account.
+
+Stop distance:
+
+Compute a “reasonable” technical stop (e.g., below base low for breakout, below recent swing low/MA for pullback).
+
+Convert to % risk = (entry − stop) / entry.
+
+Account compatibility:
+
+For a $1000 account risking 0.5–1% per trade (5–10 USD), you need % risk small enough that you can buy at least a few shares without oversizing risk.
+
+Liquidity at your size:
+
+With your size, this is rarely an issue in >1M volume names, but still compute spread and average 1‑minute volume and flag very thin intraday liquidity.
+
+Include “R‑potential” = (target − entry) / (entry − stop) and discard setups with R < 2.
+
+8. Scoring and ranking framework
+After filters, you’ll still have many candidates. Build a composite score.
+
+Example components (each normalized 0–1):
+
+Trend quality:
+
+Slope of 20‑ and 50‑SMA (steeper but not parabolic gets higher score).
+
+Momentum alignment:
+
+RSI distance from your ideal (e.g., 60 for continuation); closer = higher score.
+​
+​
+
+Volatility fit:
+
+ATR% closeness to your target band midpoint.
+
+Volume & RS:
+
+Relative volume today / recent days,
+
+1–3‑month outperformance vs index.
+
+Pattern quality:
+
+For breakouts: longer/tighter base and stronger volume multiple = higher score.
+
+For pullbacks: depth of pullback in your desired range and proximity to MA = higher.
+​
+​
+
+Risk‑reward:
+
+Maximize expected R multiple under simple assumptions (e.g., first target at prior high or 2× ATR above entry).
+
+Composite score = weighted sum of these components; tune weights with backtests.
+
+9. Practical routine for “this week / month”
+You can structure the process like this:
+
+End of week:
+
+Update daily and weekly data for your universe.
+
+Run filters 1–6.
+
+Keep top N (e.g., 50–100) by composite score as your master watchlist.
+
+Each evening:
+
+Re‑run on updated daily candles.
+
+Flag which watchlist names just triggered a breakout or gave a valid pullback reversal.
+
+Each morning:
+
+Check pre‑market gaps and volume; drop names with nasty overnight gaps against your intended direction.
+
+You then only evaluate actual trades out of a small, ranked, high‑quality list instead of the full market.
+
+10. Implementation notes (Python / AI)
+For your Python/AI system, useful feature groups:
+
+Price‑based: normalized returns (1, 4, 13, 26 weeks), volatility, ATR%, trend slopes.
+
+Indicator‑based: SMA/EMA ratios (close/SMA20, SMA20/SMA50), RSI(14), Bollinger band position (for breakouts from tight ranges).
+
+Volume‑based: average volume, relative volume, volume during base vs breakout.
+
+Pattern flags: breakout_flag, pullback_flag, consolidation_flag, distance_to_recent_high, etc.
+
+Event features: days_to_earnings, gap sizes, recent news proxy (e.g., abnormal volume + large gap).
+
+Risk features: stop_distance_pct, R_potential, position_size_possible_given_$1000.
+
+You can start with a pure rules‑based scorer, then later let ML learn weights or pattern combinations, but keep inputs interpretable so you understand why names are selected.
+
+If you tell which data source (e.g., Yahoo, Polygon, Alpha Vantage) you plan to use, a concrete feature list and function breakdown (e.g., Python module structure for scanners, ranking, and risk checks) can be outlined next.
+
+
+
+You don’t want “a stock.”
+You want a repeatable selection engine that finds the best asset to trade this week/month.
+
+Here is the professional-grade framework.
+
+🎯 OBJECTIVE
+
+Find assets that:
+
+Have enough volatility to move
+
+Are liquid
+
+Are entering early trend expansion
+
+Offer ≥ 2:1 reward:risk
+
+Align with market regime
+
+You are not predicting.
+You are ranking probability.
+
+🧠 STEP 1 — DETERMINE MARKET REGIME (Non-Negotiable)
+
+Before scanning assets, classify regime.
+
+Metrics to Compute:
+
+Index trend (use S&P 500 proxy like SPY)
+
+Price > 200 MA → Bull regime
+
+Price < 200 MA → Bear regime
+
+50 MA slope (positive or negative)
+
+VIX level (low <18, high >25)
+
+% of stocks above 200 MA
+
+Why?
+
+If regime is:
+
+Bull → Trade long breakouts/pullbacks
+
+Bear → Short rallies or stay defensive
+
+Choppy → Reduce size, focus on range plays
+
+If you skip regime filtering, your win rate collapses.
+
+🧲 STEP 2 — UNIVERSE SELECTION
+
+Filter tradable universe:
+
+Market cap > $1B
+
+Avg volume > 1M shares
+
+Price > $10
+
+No earnings within 5 trading days (optional)
+
+This removes junk and gap risk.
+
+🔥 STEP 3 — VOLATILITY FILTER
+
+You want:
+
+ATR% between 3.5% and 6%
+
+Too low → no movement
+Too high → unstable structure
+
+ATR% = ATR(14) / Close
+
+This is your “fuel” filter.
+
+📈 STEP 4 — TREND STRENGTH FILTER
+
+This is where edge begins.
+
+Calculate:
+
+Price > 20 MA
+
+20 MA > 50 MA
+
+50 MA slope positive
+
+ADX(14) > 20
+
+Higher highs / higher lows (structure check)
+
+Optional advanced:
+
+3-month return > S&P 500 return (relative strength filter)
+
+Only keep stocks that pass at least 4 of 5 conditions.
+
+This eliminates most noise.
+
+📊 STEP 5 — VOLUME CONFIRMATION
+
+Look for:
+
+Volume today > 1.5x 20-day average
+OR
+
+Recent breakout with volume expansion
+
+Volume confirms institutional participation.
+
+No volume = weak move.
+
+🎯 STEP 6 — ENTRY CONFIGURATION SCORING
+
+Now score remaining assets.
+
+A. Breakout Setup
+
+Tight consolidation (10–20 days)
+
+ATR contraction before expansion
+
+Resistance clearly defined
+
+B. Pullback Setup
+
+Pullback to 20 or 50 MA
+
+RSI reset to 40–50
+
+No breakdown in structure
+
+C. Volatility Compression Setup
+
+Bollinger Band squeeze
+
+Range narrowing
+
+ADX rising from low level
+
+Score each asset 1–5 based on:
+
+Trend alignment
+
+Volume expansion
+
+Structure clarity
+
+R:R potential
+
+Relative strength
+
+Rank top 5.
+
+🧮 STEP 7 — RISK-REWARD VALIDATION
+
+For each candidate:
+
+Identify logical stop (below structure)
+
+Identify logical target (previous high / measured move)
+
+Compute R:R
+
+Reject anything < 2:1
+
+With $1000 account:
+
+Risk per trade: 1%–2% max
+
+If stop distance = $1
+Risk allowed = $15
+Position size = 15 shares
+
+📆 WEEK VS MONTH STRATEGY DIFFERENCE
+
+Weekly swing focus:
+
+20 MA plays
+
+Breakouts from 2–3 week bases
+
+Monthly swing focus:
+
+50 MA pullbacks
+
+3–6 month consolidation breakouts
+
+Multi-month relative strength leaders
+
+🧠 ADVANCED EDGE (If Building in Python)
+
+Add:
+
+1. Rolling 3-month Sharpe ratio
+
+Prefer assets with improving risk-adjusted returns.
+
+2. Volatility expansion signal
+
+ATR rising while price > 20 MA.
+
+3. Regime-aware exposure sizing
+
+Bull regime: full size
+
+Bear regime: half size
+
+High VIX: smaller size
+
+4. Avoid correlation clustering
+
+Don’t pick 5 tech stocks.
+
+🧩 FULL SYSTEM FLOW
+
+Detect regime
+
+Filter universe
+
+Apply volatility filter
+
+Apply trend strength filter
+
+Confirm volume
+
+Score setups
+
+Validate R:R
+
+Size position
+
+This becomes your weekly scan engine.
+
+⚠ WHAT MOST PEOPLE MISS
+
+The best asset this week is usually:
+
+Already trending
+
+Showing relative strength
+
+Just finishing consolidation
+
+Not the one that “looks cheap”
+
+Strength begets strength.
+
+🏁 WHAT ACTUALLY WORKS LONG TERM
+
+The assets that repeatedly score highest in this framework are typically:
+
+Sector leaders
+
+Index outperformers
+
+Stocks making 3–12 month highs
+
+Liquid large/mid caps
+
+Not penny stocks.
+Not random reversals.
+
+If you want next, I can:
+
+Turn this into structured pseudocode for Python
+
+Help design scoring weights
+
+Or create a minimal version that is hardest to overfit

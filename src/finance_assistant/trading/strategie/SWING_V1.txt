@@ -1,0 +1,17 @@
+1 - Follow major trend:
+long term trend -> below sma 200 = short, above sma 200 = long
+Momentum = change in price over period of time 
+Check the news  
+
+
+
+2. Use Support and Resistance Levels 
+
+3. Use Moving Averages
+
+4. Incorporate Fibonacci Retracements
+
+The most common Fibonacci ratios used in trading are 23.6%, 38.2%, 50%, 61.8%, and 100%. These ratios can be used to find entry and exit points for trades, as well as to set stop-loss and take-profit orders.  
+Fibonacci retracements can also be used in conjunction with other technical indicators to confirm potential support and resistance levels.
+While Fibonacci retracements are a popular tool among traders, it’s important to remember that they are not exact and that prices can sometimes move outside of the expected levels.
+

@@ -1,0 +1,300 @@
+# SWING TRADING ASSET SELECTION SYSTEM
+# Weekly & Monthly Setup Finder — Complete Financial Specification
+
+Pipeline: Regime Detection → Universe Filter → Trend → Momentum → Volume → Pattern → Score → R:R
+
+---
+
+## SECTION 1: HIGH-LEVEL WORKFLOW
+
+This system is a top-down funnel. Never scan randomly. Reduce the universe step-by-step. Only take assets that survive every layer AND have clean price structure.
+
+### WEEKLY (Weekend — build watchlist)
+1. Classify market regime (bull / bear / neutral) + VIX level
+2. Download universe (S&P 500 or Nasdaq 100)
+3. Apply hard filters: liquidity, price, ATR%, trend alignment, RSI, ADX
+4. Detect patterns algorithmically: breakout / pullback / BB squeeze
+5. Score and rank all passing tickers via composite weighted score
+6. Keep top 10–20 as the weekly watchlist
+
+### DAILY (Each Evening — maintain watchlist)
+1. Re-download updated daily candles, re-score
+2. Flag watchlist names that triggered an entry setup today
+3. Check earnings calendar — exclude any name reporting within 5–7 trading days
+4. Visually review top 5 candidates on a chart
+
+### MORNING (Before open)
+1. Check pre-market gaps — drop anything gapping hard against your direction
+2. Confirm no adverse overnight news on candidates
+3. Set limit order at entry, stop price, and target price before market opens
+
+---
+
+## SECTION 2: MARKET REGIME DETECTION (Run First — Non-Negotiable)
+
+Skipping regime detection collapses win rate. A great setup in a bear market is a trap.
+
+### 2.1 Regime Logic (based on SPY daily data)
+
+| Condition | Regime | Bias | Size Multiplier |
+|---|---|---|---|
+| SPY > SMA200 AND SMA50 > SMA200 AND SMA50 slope > 0 | BULL | Long | 1.0x |
+| SPY < SMA200 AND SMA50 < SMA200 | BEAR | Avoid longs / short rallies | 0.5x |
+| Otherwise | NEUTRAL | Long-light (RS leaders only) | 0.7x |
+
+### 2.2 VIX Overlay (applied on top of regime)
+
+| VIX Level | Interpretation | Additional Size Adjustment |
+|---|---|---|
+| VIX < 18 | Low fear, full sizing OK | 1.0x |
+| VIX 18–25 | Normal, standard sizing | 1.0x |
+| VIX 25–30 | Elevated fear | 0.75x |
+| VIX > 30 | High fear, reduce all | 0.5x |
+| VIX > 35 | Extreme — consider standing aside | 0.25x |
+
+### 2.3 Regime Action Table
+
+| Regime | VIX | Action |
+|---|---|---|
+| Bull | < 18 | Full size, target breakouts and pullbacks |
+| Bull | 18–25 | Normal size, prefer pullback entries |
+| Bull | > 25 | Half size, widen stops, take profits sooner |
+| Neutral | Any | 70% size, highest-RS stocks only |
+| Bear | Any | Stay out of longs or short rallies, reduce exposure |
+
+---
+
+## SECTION 3: UNIVERSE & LIQUIDITY FILTERS (Hard Binary Filters)
+
+Fail any filter → ticker is immediately dropped. No exceptions.
+
+### Starting Universe
+- S&P 500 components (via Wikipedia or data provider)
+- Nasdaq 100 (higher beta, better for momentum)
+- Optionally: sector ETFs for macro plays
+
+### Hard Filters
+
+| Filter | Threshold | Reason |
+|---|---|---|
+| Price | $10 – $500 | Avoid penny stocks and extremely high-priced shares |
+| Avg daily volume (20-day) | >= 1,000,000 shares | Liquidity for entry/exit without slippage |
+| Dollar volume (20-day avg) | >= $10,000,000/day | Ensures real turnover |
+| Market cap | >= $1B | Avoid micro-caps with erratic behavior |
+| Earnings distance | No earnings within 5–7 trading days | Avoid binary gap risk |
+
+---
+
+## SECTION 4: INDICATOR CALCULATIONS
+
+Compute all on daily OHLCV bars. Minimum 60 bars required per ticker.
+
+### 4.1 Trend Indicators
+- SMA(20), SMA(50), SMA(200): price relationship to each confirms trend direction
+- EMA(20): faster-reacting; used for pullback proximity detection
+- ADX(14): measures trend strength regardless of direction; > 20 = trending, > 25 = strong
+- SMA(50) slope: (SMA50[today] / SMA50[10 bars ago]) - 1 × 100 → positive = healthy trend
+
+### 4.2 Momentum Indicators
+- RSI(14): target zone 45–70 for longs; above 50 = bullish, below 70 = not overbought
+- MACD histogram (12,26,9): positive and rising = momentum building
+
+### 4.3 Volatility Indicators
+- ATR(14): average true range; raw value and as % of close
+- ATR% = ATR(14) / Close × 100 → target band: 2% – 8% (fuel gauge)
+- Bollinger Band Bandwidth = (BB_upper - BB_lower) / BB_midline → low = squeeze
+
+### 4.4 Volume Indicators
+- RVOL = Volume[today] / Volume.rolling(20).mean() → > 1.5x = institutional interest
+- OBV = cumsum(sign(close.diff()) × volume) → rising = accumulation
+- OBV slope = (OBV[-1] - OBV[-10]) / abs(OBV[-10]) × 100 → positive = buying pressure
+
+### 4.5 Relative Strength vs Benchmark (SPY)
+- RS_Nd = stock_return_Nd - SPY_return_Nd for N = 20, 60, 120 days
+- Stock must be in top 20–30% of universe by RS on at least 1 window
+- Positive RS on all 3 windows = true leader, not just riding the market
+
+### 4.6 Key Formulas
+```
+ATR%     = ATR(14) / Close × 100
+RVOL     = Volume / rolling_mean(Volume, 20)
+RS_Nd    = pct_change(close, N) - pct_change(spy_close, N)
+OBV      = cumsum(sign(diff(close)) × volume)
+BB_bw    = (BB_upper - BB_lower) / BB_midline
+SMA50_slope = (SMA50[-1] / SMA50[-10] - 1) × 100
+```
+
+---
+
+## SECTION 5: ENTRY PATTERN DETECTION
+
+Three patterns cover the vast majority of swing opportunities. Detect algorithmically.
+
+### Pattern Summary Table
+
+| Pattern | Entry Condition | Stop | Target |
+|---|---|---|---|
+| Breakout | Close > base_high × 1.005; RVOL > 1.5x; tight 10–20-day base | Below base low | Prior high or +2 ATR |
+| Pullback to EMA | Dip 3–12% to EMA20; RSI 45–55; reversal candle | 1.5 ATR below entry | Prior swing high |
+| BB Squeeze | BB bandwidth in lowest 25th pct of 50 bars; ADX rising | Below recent swing low | +2 ATR from entry |
+
+### 5.1 Breakout from Consolidation
+
+Detection logic:
+1. Look back N days (default: 15). Compute max(High) and min(Low) over that window.
+2. Base tightness = max(High) / min(Low) - 1 → must be <= 0.12 (12%)
+3. Volume during base: rolling mean of volume during base should be <= 20-day average (quiet base)
+4. Breakout trigger: today's close > base_high × 1.005 AND RVOL >= 1.5
+5. Quality scoring: longer base + tighter range + stronger volume surge = higher quality score
+
+Quality score components (each 0–1, then averaged):
+- tightness_score = 1 - (base_range / 0.12)
+- length_score = min(base_length / 30, 1.0)
+- volume_score = min((RVOL - 1) / 2, 1.0)
+- base_quiet_score = max(1 - base_avg_vol_ratio, 0)
+
+### 5.2 Pullback to Moving Average
+
+Detection logic:
+1. Pre-condition: close > SMA50 AND SMA50 is sloping up (positive slope)
+2. Pullback depth: (recent_20d_high - close) / recent_20d_high → must be 3%–12%
+3. EMA proximity: abs(close - EMA20) / EMA20 → must be <= 2.5%
+4. RSI reset: RSI between 40 and 60 (not breakdown, healthy reset)
+5. Reversal candle: today's close > yesterday's high
+6. Volume profile: pullback bars below average, entry bar above average
+
+Quality score components:
+- pullback_depth_score: ideal ~7%, penalize deviation from 7%
+- ema_proximity_score: closer to EMA = higher score
+- rsi_score: ideal RSI ~52, penalize deviation
+- reversal_score: 1.0 if reversal candle, 0.5 if not
+- quiet_pullback_score: 1.0 if pullback vol < avg, 0.3 if not
+
+### 5.3 Bollinger Band Squeeze
+
+Detection logic:
+1. Compute BB bandwidth for last 50 bars
+2. Squeeze = current bandwidth <= 25th percentile of the last 50 bars
+3. ADX starting to rise (ADX rising from below 20)
+4. Price near BB midline (not already pressed against upper or lower band)
+5. Score = proportional to how low the bandwidth is relative to recent history
+
+---
+
+## SECTION 6: COMPOSITE SCORING SYSTEM
+
+After hard filters, many tickers survive. Score ranks them by probability quality.
+
+Each component is normalized 0.0–1.0, multiplied by weight, summed, multiplied by 100.
+
+### Scoring Weights
+
+| Component | Weight | How to Score 1.0 |
+|---|---|---|
+| Trend alignment | 20% | All 5 trend conditions met (price > SMA20 > SMA50 > SMA200, ADX > 20) |
+| Pattern quality | 20% | Clean breakout/pullback with tight base, high RVOL, ideal RSI |
+| Relative strength | 15% | Outperforms SPY on all 3 windows (1M, 3M, 6M) |
+| Relative volume | 12% | RVOL > 3x (strong institutional volume surge) |
+| RSI alignment | 10% | RSI near 60 (early continuation zone, not overbought) |
+| Risk:Reward | 10% | R:R > 5:1 |
+| ATR% fit | 8% | ATR% near 4.5% (ideal swing volatility) |
+| OBV slope | 5% | OBV rising over last 10 days |
+
+Composite = sum(component × weight) × 100
+
+### Regime Multiplier (applied after composite score)
+- Bull regime: × 1.1
+- Neutral: × 1.0
+- Bear: × 0.6
+- VIX > 30: additional × 0.8
+
+Score thresholds:
+- Score >= 60: Strong candidate — investigate seriously
+- Score 45–59: Moderate — only if chart structure is clean
+- Score < 45: Weak — avoid
+
+---
+
+## SECTION 7: RISK MANAGEMENT & POSITION SIZING
+
+Every trade requires three numbers set BEFORE execution: entry, stop, target.
+If R:R < 2:1 → reject the trade regardless of how the chart looks.
+
+### 7.1 Stop Placement by Pattern
+- Breakout: below the base low (the support that just held)
+- Pullback: 1.0–1.5 × ATR(14) below the entry candle
+- Squeeze: below the most recent swing low
+
+### 7.2 Target Calculation
+- First target: prior swing high (known supply zone)
+- Second target: measured move = base_height + breakout_point
+- Never place target at round numbers — use price structure only
+
+### 7.3 Position Sizing Formula
+```
+dollar_risk    = account_size × risk_pct_per_trade    (e.g., $1000 × 0.01 = $10)
+risk_per_share = entry_price - stop_price
+shares         = floor(dollar_risk / risk_per_share)
+position_value = shares × entry_price
+max_rr         = (target - entry) / (entry - stop)    # must be >= 2.0
+```
+
+### 7.4 Position Size Table
+
+| Account | Risk/Trade | Dollar Risk | Example |
+|---|---|---|---|
+| $1,000 | 1% | $10 | Buy $50 stock, stop $49 → 10 shares max |
+| $5,000 | 1% | $50 | Buy $50 stock, stop $47 → 17 shares max |
+| $10,000 | 1% | $100 | Buy $50 stock, stop $45 → 20 shares max |
+| $25,000 | 1% | $250 | Buy $50 stock, stop $45 → 50 shares max |
+
+### 7.5 Portfolio Risk Rules
+1. Never risk more than 1–2% of account on any single trade
+2. Never hold more than 4–5 open positions simultaneously
+3. Total portfolio risk (all open positions combined) must not exceed 5–8%
+4. R:R below 2:1 = reject, even if chart looks perfect
+
+---
+
+## SECTION 8: WEEKLY EXECUTION CHECKLIST
+
+### Sunday Evening
+1. Run full scanner → produces ranked watchlist
+2. Open top 10 in charting platform, visually inspect each chart
+3. Eliminate any with messy structure even if score is high
+4. Check earnings calendar — exclude anything reporting within 7 days
+5. Set price alerts at entry levels for remaining candidates
+
+### Monday–Friday Evenings
+1. Re-run scanner with updated daily data
+2. Flag watchlist names that triggered an entry today
+3. Compute exact stop, target, R:R, shares for triggered names
+4. Enter limit order for next day if setup is still clean
+
+### Core Mental Edge
+The best asset this week is almost always:
+- Already trending (not starting to trend)
+- Showing relative outperformance vs peers
+- Just finishing a consolidation or healthy pullback
+- NOT the stock that looks cheap or is making news
+
+Strength begets strength. Trade leaders, not laggards.
+
+---
+
+## SECTION 9: DATA SOURCE NOTES (Interactive Brokers / ib_async)
+
+The system requires the following data via IB API:
+- Historical daily OHLCV bars for each ticker (1 year minimum, 252+ bars)
+- Historical daily bars for SPY (benchmark) and VIX (^VIX)
+- Real-time or delayed quotes for pre-market gap checks
+- Contract definitions for each ticker (STK, SMART, USD)
+- Optional: fundamental data for earnings date lookup
+
+IB bar size for daily data: "1 day"
+IB duration for 1 year: "1 Y"
+IB whatToShow: "TRADES" for price/volume, "HISTORICAL_VOLATILITY" optional
+VIX ticker in IB: contract type IND, symbol "VIX", exchange "CBOE"
+
+Rate limiting: IB allows approximately 50 historical data requests per 10 minutes.
+Batch requests with delays between calls to avoid pacing violations.

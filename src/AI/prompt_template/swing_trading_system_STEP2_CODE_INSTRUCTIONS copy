@@ -1,0 +1,919 @@
+# SWING SCANNER — CODE INSTRUCTION BLUEPRINT
+# Interactive Brokers (ib_async) + Plotly Dash Visualization
+
+---
+
+## ARCHITECTURE OVERVIEW
+
+```
+swing_scanner/
+├── config.py           # All parameters — the only file you touch to tune the system
+├── ib_client.py        # IB connection, contract building, historical data fetching
+├── universe.py         # S&P 500 / Nasdaq 100 ticker list loader
+├── indicators.py       # All TA computations (pure functions, no side effects)
+├── regime.py           # Market regime detection using SPY + VIX
+├── filters.py          # Hard binary filters (liquidity, price, ATR%, trend)
+├── patterns.py         # Pattern detection: breakout, pullback, BB squeeze
+├── scorer.py           # Composite scoring engine + regime multiplier
+├── risk.py             # Stop / target / R:R / position sizing calculator
+├── scanner.py          # Main orchestrator — runs the full pipeline
+├── dashboard.py        # Plotly Dash visualization app
+└── run.py              # Entry point: python run.py [--mode weekly|daily|dashboard]
+```
+
+Each module is independent. Each function has one job. Parameters always come from config.py — never hardcoded inside logic modules.
+
+---
+
+## MODULE 1: config.py
+
+PURPOSE: Single source of truth for all tunable parameters.
+
+```python
+CONFIG = {
+    # -- Account
+    "account_size":          1000.0,    # USD
+    "risk_per_trade_pct":    0.01,      # 1% risk per trade
+    "min_rr_ratio":          2.0,       # minimum reward:risk ratio
+
+    # -- Universe
+    "universe":              "sp500",   # "sp500" | "nasdaq100" | "custom"
+    "custom_tickers":        [],        # used if universe == "custom"
+
+    # -- Liquidity (hard filters)
+    "min_price":             10.0,
+    "max_price":             500.0,
+    "min_avg_volume":        1_000_000,
+    "min_dollar_volume":     10_000_000,
+
+    # -- Trend filters
+    "sma_periods":           [20, 50, 200],
+    "ema_fast":              20,
+    "min_trend_conditions":  3,          # out of 5 to pass (soft)
+
+    # -- Momentum
+    "rsi_period":            14,
+    "rsi_min":               45.0,
+    "rsi_max":               70.0,
+
+    # -- Volatility
+    "atr_period":            14,
+    "atr_pct_min":           2.0,
+    "atr_pct_max":           8.0,
+    "atr_pct_ideal":         4.5,       # for scoring ATR fit component
+
+    # -- ADX
+    "adx_period":            14,
+    "adx_min":               20.0,
+
+    # -- Volume
+    "rvol_threshold":        1.5,       # relative volume trigger
+    "rvol_avg_period":       20,
+
+    # -- Relative strength
+    "rs_windows":            [20, 60, 120],   # ~1M, 3M, 6M trading days
+    "benchmark":             "SPY",
+
+    # -- Pattern: Breakout
+    "consolidation_days":    15,
+    "consolidation_tight":   0.12,      # max base range (12%)
+    "breakout_buffer_pct":   0.005,     # close must exceed base_high by 0.5%
+
+    # -- Pattern: Pullback
+    "pullback_min_pct":      0.03,
+    "pullback_max_pct":      0.12,
+    "pullback_ema_touch":    0.025,     # must be within 2.5% of EMA20
+    "pullback_rsi_min":      40.0,
+    "pullback_rsi_max":      60.0,
+
+    # -- Pattern: BB Squeeze
+    "bb_period":             20,
+    "bb_std":                2.0,
+    "squeeze_percentile":    0.25,      # bottom 25% of BB bandwidth = squeeze
+    "squeeze_lookback":      50,
+
+    # -- Scoring weights (must sum to 1.0)
+    "score_weights": {
+        "trend":    0.20,
+        "pattern":  0.20,
+        "rs":       0.15,
+        "rvol":     0.12,
+        "rsi":      0.10,
+        "rr":       0.10,
+        "atr_fit":  0.08,
+        "obv":      0.05,
+    },
+
+    # -- Regime multipliers
+    "regime_multipliers": {
+        "bull":    1.1,
+        "neutral": 1.0,
+        "bear":    0.6,
+    },
+    "vix_high_threshold":    30.0,
+    "vix_high_multiplier":   0.8,
+
+    # -- Output
+    "top_n":                 15,
+    "min_score_display":     40.0,
+
+    # -- IB connection
+    "ib_host":               "127.0.0.1",
+    "ib_port":               7497,       # 7497 = TWS paper, 7496 = TWS live, 4002 = Gateway paper
+    "ib_client_id":          1,
+    "ib_timeout":            30,         # seconds
+
+    # -- IB data settings
+    "history_duration":      "1 Y",
+    "history_bar_size":      "1 day",
+    "history_what_to_show":  "TRADES",
+    "ib_request_delay":      0.5,        # seconds between historical requests (pacing)
+    "min_bars_required":     60,
+
+    # -- Dashboard
+    "dashboard_host":        "127.0.0.1",
+    "dashboard_port":        8050,
+    "dashboard_refresh_sec": 300,        # auto-refresh interval
+}
+```
+
+HOW TO USE config.py:
+- Import it as: `from config import CONFIG`
+- Pass `cfg = CONFIG` into every function that needs parameters
+- Never hardcode threshold values in logic modules
+- To run a different scenario, duplicate CONFIG and override specific keys
+
+---
+
+## MODULE 2: ib_client.py
+
+PURPOSE: Wrap all IB API interaction. The rest of the system never calls IB directly.
+
+### Dependencies
+```
+pip install ib_async  # or: pip install ib-insync (ib_async is the maintained fork)
+```
+
+Note on ib_async vs ib_insync:
+- ib_insync is the well-known library but is no longer actively maintained
+- ib_async is the maintained fork with identical API, same import structure
+- Recommendation: use ib_async
+- Install: pip install ib_async
+- Import: from ib_async import IB, Stock, Index, Contract, util
+
+### Class: IBClient
+
+```
+class IBClient:
+
+    __init__(cfg):
+        Store cfg. Initialize self.ib = IB(). self._connected = False.
+
+    async connect():
+        Call ib.connectAsync(host, port, clientId).
+        Set self._connected = True.
+        Log connection success with host:port.
+        Raise ConnectionError with helpful message if fails (hint: check TWS/Gateway is running).
+
+    async disconnect():
+        If connected, call ib.disconnect().
+
+    def make_stock_contract(ticker: str) -> Contract:
+        Return Stock(ticker, "SMART", "USD").
+        This is the standard US equity contract.
+
+    def make_index_contract(symbol: str, exchange: str) -> Contract:
+        Return Index(symbol, exchange).
+        For VIX: Index("VIX", "CBOE").
+        For SPY: use Stock("SPY", "SMART", "USD") — SPY is an ETF, not index.
+
+    async fetch_historical(contract, duration, bar_size, what_to_show) -> pd.DataFrame:
+        Call ib.reqHistoricalDataAsync(
+            contract=contract,
+            endDateTime="",
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow=what_to_show,
+            useRTH=True,
+            formatDate=1
+        ).
+        Convert result to DataFrame: columns = [date, open, high, low, close, volume].
+        Set date as index (parse to datetime).
+        Return empty DataFrame if result is None or len < min_bars_required.
+
+    async fetch_all_historical(tickers: list, cfg: dict) -> dict:
+        Loop over tickers.
+        For each: build contract, call fetch_historical, store in results dict.
+        Sleep cfg["ib_request_delay"] between each request to respect IB pacing rules.
+        Log progress every 10 tickers.
+        Skip and log warning if fetch fails (don't crash the whole scan).
+        Return dict: {ticker: DataFrame}.
+
+    async fetch_vix(cfg: dict) -> pd.Series:
+        Build VIX contract (Index "VIX" on "CBOE").
+        Fetch historical with whatToShow="TRADES".
+        Return close price series.
+        On failure, return empty Series (regime will fall back to neutral).
+```
+
+IMPORTANT NOTES for ib_client.py:
+- Always use async/await — ib_async is fully async
+- IB pacing rule: max ~50 historical data requests per 10 minutes → add 0.5s delay between requests
+- For large universes (500 tickers), the fetch will take ~5 minutes — this is normal and expected
+- If ticker is invalid in IB, the request returns empty — catch this gracefully
+- Paper trading port 7497 for testing, live port 7496. Never mix them by accident.
+- client_id must be unique if multiple scripts connect simultaneously
+
+---
+
+## MODULE 3: universe.py
+
+PURPOSE: Provide the list of tickers to scan.
+
+```
+function get_tickers(cfg: dict) -> list[str]:
+
+    if cfg["universe"] == "sp500":
+        Fetch from: https://en.wikipedia.org/wiki/List_of_S%26P_500_companies
+        Parse with pandas.read_html(), take table[0]["Symbol"].
+        Replace "." with "-" in ticker strings (BRK.B → BRK-B).
+        Return as list.
+
+    if cfg["universe"] == "nasdaq100":
+        Fetch from: https://en.wikipedia.org/wiki/Nasdaq-100
+        Parse with pandas.read_html(), find the table with "Ticker" column.
+        Return as list.
+
+    if cfg["universe"] == "custom":
+        Return cfg["custom_tickers"] directly.
+
+    On any fetch failure:
+        Log warning.
+        Return hardcoded fallback list of 40 large-cap tickers.
+```
+
+---
+
+## MODULE 4: indicators.py
+
+PURPOSE: All technical indicator calculations. Pure functions only. Input = pd.Series or pd.DataFrame. Output = pd.Series.
+
+```
+function calc_sma(series: pd.Series, period: int) -> pd.Series:
+    Return series.rolling(period).mean()
+
+function calc_ema(series: pd.Series, period: int) -> pd.Series:
+    Return series.ewm(span=period, adjust=False).mean()
+
+function calc_rsi(series: pd.Series, period: int) -> pd.Series:
+    delta = series.diff()
+    gain  = delta.clip(lower=0).rolling(period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(period).mean()
+    rs    = gain / (loss + 1e-10)
+    return 100 - (100 / (1 + rs))
+
+function calc_atr(high, low, close, period: int) -> pd.Series:
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low  - close.shift(1)).abs()
+    tr  = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
+function calc_adx(high, low, close, period: int) -> pd.Series:
+    Compute +DM, -DM, TR.
+    Smooth each with Wilder smoothing (rolling mean approximation is acceptable for scanner).
+    +DI = 100 × smoothed_plus_dm / smoothed_tr
+    -DI = 100 × smoothed_minus_dm / smoothed_tr
+    DX  = 100 × abs(+DI - -DI) / (+DI + -DI + 1e-10)
+    ADX = DX.rolling(period).mean()
+    Return ADX series.
+
+function calc_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    direction = sign(close.diff()).fillna(0)
+    return (direction × volume).cumsum()
+
+function calc_bb_bandwidth(close: pd.Series, period: int, std_mult: float) -> pd.Series:
+    sma   = calc_sma(close, period)
+    std   = close.rolling(period).std()
+    upper = sma + std_mult × std
+    lower = sma - std_mult × std
+    return (upper - lower) / (sma + 1e-10)
+
+function calc_all(df: pd.DataFrame, cfg: dict) -> dict:
+    Call all above functions.
+    Return dict of named Series:
+    {
+        "sma20", "sma50", "sma200",
+        "ema20",
+        "rsi",
+        "atr", "atr_pct",
+        "adx",
+        "obv",
+        "bb_bw",
+    }
+    All computed using parameters from cfg.
+```
+
+---
+
+## MODULE 5: regime.py
+
+PURPOSE: Classify overall market regime from SPY and VIX data.
+
+```
+function detect_regime(spy_df: pd.DataFrame, vix_series: pd.Series, cfg: dict) -> dict:
+
+    close  = spy_df["close"]
+    sma50  = calc_sma(close, 50).iloc[-1]
+    sma200 = calc_sma(close, 200).iloc[-1]
+    sma50_prev = calc_sma(close, 50).iloc[-10]
+    slope  = (sma50 / sma50_prev - 1) × 100
+    price  = close.iloc[-1]
+
+    if price > sma200 AND sma50 > sma200 AND slope > 0:
+        trend = "bull"
+    elif price < sma200 AND sma50 < sma200:
+        trend = "bear"
+    else:
+        trend = "neutral"
+
+    vix = vix_series.iloc[-1] if len(vix_series) > 0 else None
+
+    if vix is None:
+        vix_regime = "unknown"
+        size_mult = cfg["regime_multipliers"][trend]
+    elif vix < 18:
+        vix_regime = "low"
+        size_mult = cfg["regime_multipliers"][trend] × 1.0
+    elif vix < 25:
+        vix_regime = "normal"
+        size_mult = cfg["regime_multipliers"][trend] × 1.0
+    elif vix < 30:
+        vix_regime = "elevated"
+        size_mult = cfg["regime_multipliers"][trend] × 0.75
+    else:
+        vix_regime = "high"
+        size_mult = cfg["regime_multipliers"][trend] × cfg["vix_high_multiplier"]
+
+    return {
+        "trend":      trend,       # "bull" | "bear" | "neutral"
+        "vix":        vix,
+        "vix_regime": vix_regime,
+        "size_mult":  size_mult,
+        "spy_price":  price,
+        "sma50":      sma50,
+        "sma200":     sma200,
+        "slope50":    slope,
+    }
+```
+
+---
+
+## MODULE 6: filters.py
+
+PURPOSE: Hard binary filters. Return True = passes, False = drop.
+
+```
+function passes_liquidity(df: pd.DataFrame, cfg: dict) -> bool:
+    price    = df["close"].iloc[-1]
+    avg_vol  = df["volume"].rolling(20).mean().iloc[-1]
+    dol_vol  = (df["close"] × df["volume"]).rolling(20).mean().iloc[-1]
+
+    return (
+        cfg["min_price"] <= price <= cfg["max_price"]
+        AND avg_vol >= cfg["min_avg_volume"]
+        AND dol_vol >= cfg["min_dollar_volume"]
+    )
+
+function passes_trend(inds: dict, cfg: dict) -> tuple[bool, int]:
+    # Returns (passes: bool, conditions_met: int out of 5)
+    s20  = inds["sma20"].iloc[-1]
+    s50  = inds["sma50"].iloc[-1]
+    s200 = inds["sma200"].iloc[-1]
+    p    = inds["close_last"]     # scalar, pass in from df["close"].iloc[-1]
+    adx  = inds["adx"].iloc[-1]
+    slope50 = (inds["sma50"].iloc[-1] / inds["sma50"].iloc[-10] - 1) × 100
+
+    conditions = [
+        p > s20,
+        s20 > s50,
+        s50 > s200,
+        slope50 > 0,
+        adx > cfg["adx_min"],
+    ]
+    met = sum(conditions)
+    return met >= cfg["min_trend_conditions"], met
+
+function passes_volatility(inds: dict, cfg: dict) -> bool:
+    atr_pct = inds["atr_pct"].iloc[-1]
+    return cfg["atr_pct_min"] <= atr_pct <= cfg["atr_pct_max"]
+
+function apply_all_filters(ticker, df, inds, cfg) -> tuple[bool, str]:
+    # Returns (passes: bool, rejection_reason: str)
+    if len(df) < cfg["min_bars_required"]:
+        return False, "insufficient_bars"
+    if not passes_liquidity(df, cfg):
+        return False, "liquidity"
+    if not passes_volatility(inds, cfg):
+        return False, "volatility"
+    trend_ok, trend_count = passes_trend(inds, cfg)
+    if not trend_ok:
+        return False, f"trend_{trend_count}_of_5"
+    return True, "ok"
+```
+
+---
+
+## MODULE 7: patterns.py
+
+PURPOSE: Detect the three swing entry patterns. Return flag and quality score.
+
+```
+function detect_breakout(df: pd.DataFrame, inds: dict, cfg: dict) -> dict:
+
+    n        = cfg["consolidation_days"]
+    base     = df.iloc[-(n+1):-1]   # exclude today
+    today    = df.iloc[-1]
+
+    base_high  = base["high"].max()
+    base_low   = base["low"].min()
+    base_range = base_high / base_low - 1
+
+    if base_range > cfg["consolidation_tight"]:
+        return {"flag": False, "score": 0.0, "type": "breakout"}
+
+    avg_vol_20 = df["volume"].rolling(20).mean().iloc[-1]
+    base_avg_vol = base["volume"].mean()
+    base_vol_ratio = base_avg_vol / (avg_vol_20 + 1e-1)
+
+    breakout_price = today["close"] > base_high × (1 + cfg["breakout_buffer_pct"])
+    rvol           = today["volume"] / (base_avg_vol + 1e-1)
+
+    if not breakout_price OR rvol < cfg["rvol_threshold"]:
+        return {"flag": False, "score": 0.0, "type": "breakout"}
+
+    tightness_score = 1 - (base_range / cfg["consolidation_tight"])
+    length_score    = min(n / 30, 1.0)
+    volume_score    = min((rvol - 1) / 2, 1.0)
+    quiet_score     = max(1 - base_vol_ratio, 0)
+    quality         = mean([tightness_score, length_score, volume_score, quiet_score])
+
+    return {
+        "flag":          True,
+        "score":         round(quality, 3),
+        "type":          "breakout",
+        "base_range_pct": round(base_range × 100, 2),
+        "base_length":   n,
+        "rvol":          round(rvol, 2),
+    }
+
+
+function detect_pullback(df: pd.DataFrame, inds: dict, cfg: dict) -> dict:
+
+    close  = df["close"]
+    sma50  = inds["sma50"]
+    ema20  = inds["ema20"]
+    rsi    = inds["rsi"]
+
+    price_above_50  = close.iloc[-1] > sma50.iloc[-1]
+    sma50_sloping   = sma50.iloc[-1] > sma50.iloc[-10]
+
+    if not (price_above_50 AND sma50_sloping):
+        return {"flag": False, "score": 0.0, "type": "pullback"}
+
+    recent_high  = df["high"].iloc[-20:].max()
+    pullback_pct = (recent_high - close.iloc[-1]) / recent_high
+
+    if not (cfg["pullback_min_pct"] <= pullback_pct <= cfg["pullback_max_pct"]):
+        return {"flag": False, "score": 0.0, "type": "pullback"}
+
+    ema_dist = abs(close.iloc[-1] - ema20.iloc[-1]) / ema20.iloc[-1]
+    if ema_dist > cfg["pullback_ema_touch"]:
+        return {"flag": False, "score": 0.0, "type": "pullback"}
+
+    rsi_val = rsi.iloc[-1]
+    if not (cfg["pullback_rsi_min"] < rsi_val < cfg["pullback_rsi_max"]):
+        return {"flag": False, "score": 0.0, "type": "pullback"}
+
+    avg_vol    = df["volume"].rolling(20).mean().iloc[-1]
+    pull_rvol  = df["volume"].iloc[-3:].mean() / (avg_vol + 1e-1)
+    reversal   = close.iloc[-1] > df["high"].iloc[-2]
+
+    depth_score    = max(1 - abs(pullback_pct - 0.07) / 0.05, 0)
+    ema_score      = max(1 - ema_dist / cfg["pullback_ema_touch"], 0)
+    rsi_score      = max(1 - abs(rsi_val - 52) / 12, 0)
+    reversal_score = 1.0 if reversal else 0.5
+    quiet_score    = 1.0 if pull_rvol < 1.0 else 0.3
+
+    quality = mean([depth_score, ema_score, rsi_score, reversal_score, quiet_score])
+
+    return {
+        "flag":          True,
+        "score":         round(quality, 3),
+        "type":          "pullback",
+        "pullback_pct":  round(pullback_pct × 100, 2),
+        "rsi":           round(rsi_val, 1),
+        "ema_dist_pct":  round(ema_dist × 100, 2),
+        "reversal":      reversal,
+    }
+
+
+function detect_squeeze(df: pd.DataFrame, inds: dict, cfg: dict) -> dict:
+
+    bw       = inds["bb_bw"]
+    lookback = cfg["squeeze_lookback"]
+
+    if len(bw.dropna()) < lookback:
+        return {"flag": False, "score": 0.0, "type": "squeeze"}
+
+    threshold = bw.rolling(lookback).quantile(cfg["squeeze_percentile"]).iloc[-1]
+    squeeze   = bw.iloc[-1] <= threshold
+
+    if not squeeze:
+        return {"flag": False, "score": 0.0, "type": "squeeze"}
+
+    # Score: how tight is the squeeze?
+    p75   = bw.rolling(lookback).quantile(0.75).iloc[-1]
+    score = max(1 - (bw.iloc[-1] / (threshold + 1e-10)), 0)
+    score = min(score, 1.0)
+
+    return {"flag": True, "score": round(score, 3), "type": "squeeze"}
+
+
+function detect_best_pattern(df, inds, cfg) -> dict:
+    bo = detect_breakout(df, inds, cfg)
+    pb = detect_pullback(df, inds, cfg)
+    sq = detect_squeeze(df, inds, cfg)
+
+    candidates = [bo, pb, sq]
+    best = max(candidates, key=lambda x: x["score"])
+
+    if best["score"] == 0.0:
+        return {"flag": False, "score": 0.0, "type": "none"}
+    return best
+```
+
+---
+
+## MODULE 8: scorer.py
+
+PURPOSE: Compute composite score from all signals. Apply regime multiplier.
+
+```
+function score_ticker(ticker, df, inds, pattern_result, rs_scores, regime, cfg) -> dict:
+
+    # --- Individual component scores (each 0.0 – 1.0) ---
+
+    # Trend (count of 5 conditions met / 5)
+    _, trend_count = passes_trend(inds, cfg)     # import from filters.py
+    c_trend = trend_count / 5
+
+    # RSI (distance from ideal = 60)
+    rsi_val = inds["rsi"].iloc[-1]
+    c_rsi   = max(1 - abs(rsi_val - 60) / 30, 0) if 40 < rsi_val < 80 else 0.1
+
+    # ATR fit (distance from ideal = 4.5%)
+    atr_pct = inds["atr_pct"].iloc[-1]
+    c_atr   = max(1 - abs(atr_pct - cfg["atr_pct_ideal"]) / 3, 0)
+
+    # Relative volume
+    avg_vol = df["volume"].rolling(20).mean().iloc[-1]
+    rvol    = df["volume"].iloc[-1] / (avg_vol + 1e-1)
+    c_rvol  = min(max((rvol - 1) / 2, 0), 1.0)
+
+    # Relative strength (average of all windows)
+    rs_avg  = mean(rs_scores) if rs_scores else 0.0
+    c_rs    = min(max(rs_avg × 10 + 0.5, 0), 1.0)
+
+    # Pattern quality (from patterns.py)
+    c_pattern = pattern_result["score"]
+
+    # OBV slope
+    obv_slope = (inds["obv"].iloc[-1] - inds["obv"].iloc[-10]) / (abs(inds["obv"].iloc[-10]) + 1e-10)
+    c_obv = 1.0 if obv_slope > 0 else 0.0
+
+    # Risk:Reward (computed here before risk module)
+    # Pass risk_result into this function OR compute inline
+    # Use a placeholder: c_rr = 0 if no valid R:R, else normalize
+    # Actual R:R computed in risk.py — pass in as parameter
+    c_rr = 0.0  # set externally after risk.py computes
+
+    # --- Weighted composite ---
+    w = cfg["score_weights"]
+    composite = (
+        w["trend"]   × c_trend  +
+        w["rsi"]     × c_rsi    +
+        w["atr_fit"] × c_atr    +
+        w["rvol"]    × c_rvol   +
+        w["rs"]      × c_rs     +
+        w["pattern"] × c_pattern+
+        w["rr"]      × c_rr     +
+        w["obv"]     × c_obv
+    ) × 100
+
+    # --- Regime multiplier ---
+    composite × = cfg["regime_multipliers"].get(regime["trend"], 1.0)
+    if regime["vix"] and regime["vix"] > cfg["vix_high_threshold"]:
+        composite × = cfg["vix_high_multiplier"]
+
+    return {
+        "ticker":         ticker,
+        "score":          round(composite, 1),
+        "c_trend":        round(c_trend, 3),
+        "c_rsi":          round(c_rsi, 3),
+        "c_atr":          round(c_atr, 3),
+        "c_rvol":         round(c_rvol, 3),
+        "c_rs":           round(c_rs, 3),
+        "c_pattern":      round(c_pattern, 3),
+        "c_obv":          round(c_obv, 3),
+        "trend_count":    trend_count,
+        "rsi":            round(rsi_val, 1),
+        "atr_pct":        round(atr_pct, 2),
+        "rvol":           round(rvol, 2),
+        "pattern":        pattern_result["type"],
+        "pattern_score":  pattern_result["score"],
+    }
+```
+
+---
+
+## MODULE 9: risk.py
+
+PURPOSE: Compute stop, target, position size, and R:R for each candidate.
+
+```
+function compute_risk(df, inds, pattern_result, cfg) -> dict:
+
+    close = df["close"].iloc[-1]
+    atr   = inds["atr"].iloc[-1]
+    low20 = df["low"].iloc[-20:].min()
+    high20= df["high"].iloc[-20:].max()
+
+    pattern_type = pattern_result["type"]
+
+    if pattern_type == "breakout":
+        stop   = low20                         # below base low
+        target = close + 2 × atr              # or high20 if higher
+
+    elif pattern_type == "pullback":
+        stop   = close - 1.5 × atr            # 1.5 ATR below entry
+        target = high20                        # prior swing high
+
+    elif pattern_type == "squeeze":
+        stop   = close - atr                   # 1 ATR below
+        target = close + 2 × atr
+
+    else:  # no pattern — use generic
+        stop   = close - atr
+        target = close + 2 × atr
+
+    stop   = max(stop, 0.01)
+    risk   = close - stop
+    reward = target - close
+
+    if risk <= 0:
+        return {"valid": False, "rr": 0}
+
+    rr = reward / risk
+
+    dollar_risk  = cfg["account_size"] × cfg["risk_per_trade_pct"]
+    shares       = int(dollar_risk / risk)
+    position_val = shares × close
+
+    size_mult    = 1.0   # pass regime.size_mult from outside if needed
+
+    return {
+        "valid":          rr >= cfg["min_rr_ratio"] AND shares >= 1,
+        "entry":          round(close, 2),
+        "stop":           round(stop, 2),
+        "target":         round(target, 2),
+        "risk_per_share": round(risk, 2),
+        "rr":             round(rr, 2),
+        "shares":         shares,
+        "position_value": round(position_val, 2),
+        "dollar_risk":    round(dollar_risk, 2),
+        "risk_pct":       round(risk / close × 100, 2),
+    }
+```
+
+---
+
+## MODULE 10: scanner.py
+
+PURPOSE: Main orchestrator. Runs the full pipeline end to end.
+
+```
+async function run_scanner(cfg: dict) -> pd.DataFrame:
+
+    # Step 1: Universe
+    tickers = get_tickers(cfg)                        # universe.py
+    print(f"Universe: {len(tickers)} tickers")
+
+    # Step 2: IB Connection + Data
+    client = IBClient(cfg)
+    await client.connect()
+
+    spy_df  = await client.fetch_historical(make_stock_contract("SPY"), ...)
+    vix_s   = await client.fetch_vix(cfg)
+    data    = await client.fetch_all_historical(tickers, cfg)
+
+    await client.disconnect()
+
+    # Step 3: Regime
+    regime = detect_regime(spy_df, vix_s, cfg)        # regime.py
+    print_regime(regime)
+
+    # Step 4: Benchmark RS
+    spy_close  = spy_df["close"]
+
+    # Step 5: Score each ticker
+    results = []
+    rejected = defaultdict(int)
+
+    for ticker, df in data.items():
+
+        # Compute indicators
+        inds = calc_all(df, cfg)                      # indicators.py
+        inds["close_last"] = df["close"].iloc[-1]
+
+        # Hard filters
+        passes, reason = apply_all_filters(ticker, df, inds, cfg)   # filters.py
+        if not passes:
+            rejected[reason] += 1
+            continue
+
+        # Relative strength
+        rs_scores = [
+            df["close"].pct_change(w).iloc[-1] - spy_close.pct_change(w).iloc[-1]
+            for w in cfg["rs_windows"]
+            if len(df) >= w
+        ]
+
+        # Patterns
+        pattern = detect_best_pattern(df, inds, cfg)  # patterns.py
+
+        # Risk
+        risk = compute_risk(df, inds, pattern, cfg)   # risk.py
+
+        # Score
+        score_data = score_ticker(                    # scorer.py
+            ticker, df, inds, pattern, rs_scores, regime, cfg
+        )
+        # Inject R:R score component
+        c_rr = min(max((risk["rr"] - 2) / 3, 0), 1.0) if risk["valid"] else 0.0
+        score_data["score"] += c_rr × cfg["score_weights"]["rr"] × 100
+
+        # Combine
+        row = {**score_data, **risk}
+        results.append(row)
+
+    # Step 6: Sort and return
+    df_out = pd.DataFrame(results).sort_values("score", ascending=False).reset_index(drop=True)
+    df_out.index += 1
+
+    # Print summary
+    print_summary(df_out, regime, cfg)
+
+    # Save
+    df_out.to_csv("swing_results.csv", index=True)
+    print(f"\nPassed: {len(results)} | Rejected: {sum(rejected.values())}")
+    print(f"Rejection reasons: {dict(rejected)}")
+
+    return df_out
+```
+
+---
+
+## MODULE 11: dashboard.py
+
+PURPOSE: Plotly Dash web dashboard for visual exploration. Run separately from scanner.
+
+### Layout (4 main views)
+
+```
+View 1 — Regime Banner (top of page)
+    Show: Market Regime (BULL / BEAR / NEUTRAL), VIX level, SPY vs SMA50/SMA200
+    Color: green for bull, red for bear, orange for neutral
+
+View 2 — Ranked Watchlist Table (left panel)
+    Sortable DataTable: ticker, score, price, pattern, RSI, ATR%, RVOL, R:R, entry, stop, target
+    Click a row → updates the chart view and score breakdown
+
+View 3 — Score Breakdown Radar Chart (right panel top)
+    Plotly radar/spider chart showing 8 component scores for the selected ticker
+    Components: trend, pattern, RS, RVOL, RSI, R:R, ATR fit, OBV
+
+View 4 — Price Chart (right panel bottom)
+    Plotly candlestick chart for the selected ticker (last 100 days)
+    Overlays: SMA20 (blue), SMA50 (orange), EMA20 (green dashed)
+    Annotations: entry horizontal line (green), stop line (red), target line (blue)
+    Volume bars below price (colored green/red by day direction)
+    Pattern label on chart (e.g., "BREAKOUT" or "PULLBACK")
+```
+
+### Implementation Notes
+
+```
+Framework: plotly dash (pip install dash plotly)
+Data source: load swing_results.csv + individual ticker DataFrames on startup
+Port: cfg["dashboard_port"] (default 8050)
+URL: http://127.0.0.1:8050
+
+Callbacks:
+- row_click → update radar chart + price chart
+- refresh_button → re-run scanner (async subprocess call) and reload data
+- filter_dropdown → filter table by pattern type (all / breakout / pullback / squeeze)
+- score_slider → filter table by minimum score
+
+Candlestick chart generation function:
+    Input: df (OHLCV DataFrame), inds (indicators dict), risk (risk dict), ticker string
+    Create fig = go.Figure()
+    Add go.Candlestick trace
+    Add go.Scatter for SMA20, SMA50, EMA20
+    Add horizontal line shapes for entry, stop, target
+    Add volume bars as bar chart in subplot
+    Add title with ticker + score + pattern
+    Return fig
+
+Radar chart generation function:
+    Input: score_row (dict of component scores)
+    Categories = [Trend, Pattern, RS, RVOL, RSI, R:R, ATR, OBV]
+    Values = [c_trend, c_pattern, c_rs, c_rvol, c_rsi, c_rr, c_atr, c_obv]
+    Use go.Scatterpolar
+    Fill to center, fill color = rgba based on overall score
+```
+
+---
+
+## MODULE 12: run.py
+
+PURPOSE: Entry point. Handles CLI arguments and runs the right mode.
+
+```
+Modes:
+  python run.py --mode weekly     → full scan (IB fetch + score + save CSV)
+  python run.py --mode daily      → re-score from existing data (faster)
+  python run.py --mode dashboard  → start Dash visualization server
+  python run.py --mode test       → run on 10 tickers only (fast dev check)
+
+Implementation:
+    Parse sys.argv for --mode flag
+    Load CONFIG from config.py
+    If mode == "weekly" or "daily":
+        asyncio.run(run_scanner(CONFIG))
+    If mode == "dashboard":
+        from dashboard import build_app
+        app = build_app(CONFIG)
+        app.run_server(host=cfg["dashboard_host"], port=cfg["dashboard_port"])
+    If mode == "test":
+        CONFIG["custom_tickers"] = ["AAPL","MSFT","NVDA","GOOGL","META","AMZN","JPM","V","XOM","LLY"]
+        CONFIG["universe"] = "custom"
+        asyncio.run(run_scanner(CONFIG))
+```
+
+---
+
+## LIBRARY RECOMMENDATIONS
+
+```
+pip install ib_async          # IB API wrapper (maintained fork of ib_insync)
+pip install pandas numpy      # data manipulation
+pip install dash plotly       # visualization dashboard
+pip install requests          # for fetching ticker lists from Wikipedia
+pip install scipy             # optional: for more advanced scoring
+```
+
+Why ib_async over alternatives:
+- Native async/await support — works naturally with Python asyncio
+- Same interface as the well-known ib_insync (easy to find examples)
+- Actively maintained (ib_insync is not)
+- Full access to IB historical data, real-time quotes, order management
+- If you later want to automate order entry, you already have the connection
+
+Alternative to consider: Alpaca API (alpaca-trade-api or alpaca-py)
+- Pros: free, no account required for market data, easier rate limits
+- Cons: requires Alpaca brokerage account, not Interactive Brokers native
+- Recommendation: stick with ib_async since you already have IB
+
+---
+
+## DEBUGGING GUIDE
+
+Common IB connection issues:
+1. "Connection refused" → TWS or IB Gateway is not running. Start it first.
+2. "Client ID in use" → change cfg["ib_client_id"] to a different number
+3. "Pacing violation" → increase cfg["ib_request_delay"] to 1.0 or 2.0 seconds
+4. Empty DataFrame returned → ticker may be invalid in IB (check contract)
+5. VIX returns empty → IB Gateway may not have CBOE data subscription; use fallback
+
+Development workflow:
+1. Run in --mode test first (10 tickers, fast)
+2. Check that regime prints correctly
+3. Check that at least 1 ticker passes all filters
+4. Check that patterns detect (lower thresholds temporarily if needed)
+5. Then run full --mode weekly
+
+Parameter tuning:
+- Too few results → lower min_trend_conditions (3 → 2), widen ATR band, lower RSI min
+- Too many results → raise min_score_display, raise adx_min, tighten consolidation_tight
+- R:R too strict → lower min_rr_ratio from 2.0 to 1.5 temporarily
