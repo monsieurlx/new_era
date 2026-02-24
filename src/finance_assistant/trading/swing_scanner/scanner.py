@@ -23,6 +23,7 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 
+import os
 import pandas as pd
 
 from config import CONFIG
@@ -201,22 +202,32 @@ async def run_scanner(cfg: dict = CONFIG) -> pd.DataFrame:
     df_display = df_out[df_out["score"] >= cfg["min_score_display"]]
     _print_summary(df_display, regime, cfg, rejected, len(data))
 
-        # Output CSV to scan_result folder with yyyymmdd metadata
-        from datetime import datetime
-        import os
-        out_dir = "scan_result"
-        os.makedirs(out_dir, exist_ok=True)
+    # Output CSV to scan_result folder with yyyymmdd metadata
+    out_dir = "scan_result"
+    os.makedirs(out_dir, exist_ok=True)
+    date_str = datetime.now().strftime('%Y%m%d')
+    out_name = f"swing_results_{date_str}.csv"
+    out_path = os.path.join(out_dir, out_name)
+    df_out.to_csv(out_path, index=True)
+
+    # Apply elite filter and save watchlist
+    try:
+        from elite_filter import apply_elite_filter
+        watchlist = apply_elite_filter(df_out, cfg)
         date_str = datetime.now().strftime('%Y%m%d')
-        out_name = f"swing_results_{date_str}.csv"
-        out_path = os.path.join(out_dir, out_name)
-        df_out.to_csv(out_path, index=True)
+        watchlist_name = f"watchlist_{date_str}.csv"
+        watchlist_path = os.path.join("Scan_result", watchlist_name)
+        watchlist.to_csv(watchlist_path, index=False)
+        print(f"[Saved] {watchlist_path} ({len(watchlist)} rows)")
+    except Exception as e:
+        print(f"[Elite Filter Error] {e}")
 
-        total_elapsed = time.monotonic() - t_start
-        print(f"\n[Done] {total_elapsed:.1f}s total  "
-            f"({fetch_elapsed:.1f}s fetch + {score_elapsed:.1f}s scoring)")
-        print(f"[Saved] {out_path} ({len(df_out)} rows)")
+    total_elapsed = time.monotonic() - t_start
+    print(f"\n[Done] {total_elapsed:.1f}s total  "
+          f"({fetch_elapsed:.1f}s fetch + {score_elapsed:.1f}s scoring)")
+    print(f"[Saved] {out_path} ({len(df_out)} rows)")
 
-        return df_out
+    return df_out
 
 
 # ─── Console Display ──────────────────────────────────────────────────────────

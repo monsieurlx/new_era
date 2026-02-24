@@ -13,6 +13,15 @@ To run a different scenario, make a copy and override keys:
 """
 
 CONFIG: dict = {
+    # ─── Elite Filter Settings ──────────────────────────────────────────────
+    "elite_min_score": 60.0,         # minimum composite score for elite filter
+    "elite_min_adx": 25.0,           # minimum ADX for elite filter
+    "elite_min_rvol": 1.5,           # minimum RVOL for elite filter
+    "elite_min_rr": 2.5,             # minimum R:R for elite filter
+    "elite_require_pattern": True,   # require a valid pattern
+    "elite_max_per_sector": 2,       # max candidates per sector
+    "elite_max_total": 15,           # hard cap on total candidates
+    "elite_max_candidates": 15,      # hard cap for elite filter (matches elite_max_total)
 
     # ─── Account ─────────────────────────────────────────────────────────────
     "account_size":           1_000.0,   # USD — your total account

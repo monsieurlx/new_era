@@ -46,7 +46,9 @@ dependencies = [
     "lightweight-charts",
     "yfinance",
     # "alpha_vantage",
-    "pytz"
+    "pytz",
+    "dash",
+    "plotly",
 ]
 
 [project.optional-dependencies]

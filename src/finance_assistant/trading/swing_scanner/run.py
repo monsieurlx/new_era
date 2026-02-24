@@ -133,8 +133,19 @@ def run_dashboard(cfg: dict, data_store: dict = None):
     print("Run the scanner first (--mode weekly) to generate swing_results.csv")
     print("Press Ctrl+C to stop.\n")
 
-    app = build_app(cfg, results_csv="swing_results.csv", data_store=data_store)
-    app.run_server(
+    # Find latest watchlist file in Scan_result
+    import glob
+    import os
+    scan_dir = "Scan_result"
+    files = glob.glob(os.path.join(scan_dir, "watchlist_*.csv"))
+    if files:
+        latest = max(files, key=os.path.getmtime)
+        print(f"Loading dashboard from: {latest}")
+        results_csv = latest
+    else:
+        results_csv = os.path.join(scan_dir, "watchlist.csv")
+    app = build_app(cfg, results_csv=results_csv, data_store=data_store)
+    app.run(
         host=cfg["dashboard_host"],
         port=cfg["dashboard_port"],
         debug=False,
