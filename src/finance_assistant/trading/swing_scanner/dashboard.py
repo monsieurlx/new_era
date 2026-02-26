@@ -1,670 +1,1151 @@
 """
-dashboard.py — Live watchlist dashboard.
+dashboard.py — Always-on unified dashboard.
 
-Architecture:
-  - Dash handles the app shell: table, controls, callbacks, layout
-  - TradingView Lightweight Charts renders the candlestick panel
-    (via an embedded HTML component — looks and feels like TradingView)
-  - Plotly renders RSI, ADX, and the radar score chart (these are fine in Plotly)
+Reads state.json every 30 seconds (written by bot.py).
+No shared memory. No WebSocket. Simple and reliable.
 
-Panels:
-  Left   — Regime banner + scored watchlist table (sortable, filterable)
-  Right  — TradingView-style candlestick chart with:
-              SMA20 / SMA50 / EMA20 overlaid as line series
-              Entry / Stop / Target as horizontal price lines
-              Fibonacci levels as additional price lines
-              Volume histogram below the main chart
-  Bottom right — RSI panel (Plotly) + ADX panel (Plotly)
-  Far right     — Score radar chart for selected ticker
+Layout:
+  Top bar     — Regime banner + session status + session stats
+  Left col    — Watchlist table + activity feed
+  Right col   — Selected ticker view (tabs: Strategy / Pattern / History)
+                  Strategy tab: LWC candlestick + Fib + levels + RSI + ADX
+                  Pattern tab:  zoomed pattern chart image
+                  History tab:  trade log for this ticker + screenshots
 
 Usage:
     python run.py --mode dashboard
     Open: http://127.0.0.1:8050
 """
 
-import json
+import base64
 import logging
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 try:
     import dash
-    from dash import dcc, html, dash_table, Input, Output, State
+    from dash import dcc, html, dash_table, Input, Output, callback
     import plotly.graph_objects as go
-    DASH_AVAILABLE = True
+    DASH_OK = True
 except ImportError:
-    DASH_AVAILABLE = False
-    logger.warning("pip install dash plotly")
+    DASH_OK = False
+    log.warning("pip install dash plotly")
 
-# ── Colors (shared with order_logger.py dark theme) ───────────────────────────
+from state_manager import StateManager
+
+# ── Colours ───────────────────────────────────────────────────────────────────
 C = {
-    "bg":      "#0d1117",
-    "panel":   "#161b22",
-    "border":  "#30363d",
-    "text":    "#e6edf3",
-    "muted":   "#8b949e",
-    "bull":    "#26a69a",
-    "bear":    "#ef5350",
-    "sma20":   "#2196f3",
-    "sma50":   "#ff9800",
-    "ema20":   "#4caf50",
-    "entry":   "#26a69a",
-    "stop":    "#ef5350",
-    "target":  "#2196f3",
-    "fib":     "#ffd700",
-    "accent":  "#58a6ff",
-    "rsi":     "#e040fb",
-    "adx":     "#40c4ff",
+    "bg":     "#0d1117", "panel":  "#161b22", "border": "#30363d",
+    "text":   "#e6edf3", "muted":  "#8b949e", "accent": "#58a6ff",
+    "bull":   "#26a69a", "bear":   "#ef5350", "warn":   "#ff9800",
+    "sma20":  "#2196f3", "sma50":  "#ff9800", "ema20":  "#4caf50",
+    "bb":     "#9c27b0", "entry":  "#26a69a", "stop":   "#ef5350",
+    "target": "#2196f3", "fib":    "#ffd700", "rsi":    "#e040fb",
+    "adx":    "#40c4ff",
 }
-
-REGIME_COLOR = {"bull": C["bull"], "neutral": "#ff9800", "bear": C["bear"]}
-
-# ── Lightweight Charts CDN ─────────────────────────────────────────────────────
-LWC_CDN = "https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"
+REGIME_C = {"bull": C["bull"], "neutral": C["warn"], "bear": C["bear"]}
+LWC_CDN  = ("https://unpkg.com/lightweight-charts@4.1.1/dist/"
+             "lightweight-charts.standalone.production.js")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LIGHTWEIGHT CHARTS HTML COMPONENT
+# LIGHTWEIGHT CHARTS HTML
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_lwc_html(
-    df: pd.DataFrame,
-    inds: dict,
-    trade_levels: dict,
-    title: str = "",
-) -> str:
-    """
-    Generate a self-contained HTML string that renders a TradingView
-    Lightweight Charts candlestick chart with overlays.
+def _lwc_html(df, row, title=""):
+    import json, numpy as np
 
-    Args:
-        df:           OHLCV DataFrame (index = datetime)
-        inds:         dict with keys sma20, sma50, ema20 (pd.Series)
-        trade_levels: dict with keys entry, stop, target, swing_low, swing_high
-        title:        chart title string
+    BG="#0d1117";PANEL="#161b22";BORDER="#30363d";MUTED="#8b949e";TEXT="#e6edf3"
+    BULL="#26a69a";BEAR="#ef5350";SMA20C="#2196f3";SMA50C="#ff9800";EMA20C="#4caf50"
+    LWC_SRC="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"
 
-    Returns:
-        HTML string — embedded in an <iframe> inside Dash.
-    """
     if df.empty:
-        return "<html><body style='background:#0d1117;color:#8b949e;font-family:monospace;padding:20px'>No data</body></html>"
+        return "<html><body style='background:#0d1117;color:#8b949e;font-family:monospace;padding:30px'>No data</body></html>"
 
-    # Build OHLCV data as JS-friendly list
-    ohlcv = []
-    for idx, row in df.iterrows():
-        try:
-            ts = int(pd.Timestamp(idx).timestamp())
-        except Exception:
-            continue
-        ohlcv.append({
-            "time":  ts,
-            "open":  round(float(row["open"]),  4),
-            "high":  round(float(row["high"]),  4),
-            "low":   round(float(row["low"]),   4),
-            "close": round(float(row["close"]), 4),
-        })
-
-    volume = []
-    for idx, row in df.iterrows():
-        try:
-            ts = int(pd.Timestamp(idx).timestamp())
-        except Exception:
-            continue
-        is_bull = row["close"] >= row["open"]
-        volume.append({
-            "time":  ts,
-            "value": int(row["volume"]),
-            "color": "rgba(38,166,154,0.5)" if is_bull else "rgba(239,83,80,0.5)",
-        })
-
-    def _series(series: pd.Series, color: str) -> list:
-        out = []
-        for idx, val in series.items():
-            if pd.isna(val):
-                continue
-            try:
-                ts = int(pd.Timestamp(idx).timestamp())
-                out.append({"time": ts, "value": round(float(val), 4)})
-            except Exception:
-                pass
-        return out
-
-    sma20_data = _series(inds.get("sma20", pd.Series(dtype=float)), C["sma20"])
-    sma50_data = _series(inds.get("sma50", pd.Series(dtype=float)), C["sma50"])
-    ema20_data = _series(inds.get("ema20", pd.Series(dtype=float)), C["ema20"])
-
-    # Fibonacci levels
-    sl = trade_levels.get("swing_low", 0)
-    sh = trade_levels.get("swing_high", 0)
-    fib_levels = []
-    if sh > sl > 0:
-        diff = sh - sl
-        for ratio, label in [
-            (0.0,   "Fib 0"),
-            (0.236, "Fib 0.236"),
-            (0.382, "Fib 0.382"),
-            (0.500, "Fib 0.5"),
-            (0.618, "Fib 0.618"),
-            (0.786, "Fib 0.786"),
-            (1.0,   "Fib 1"),
-        ]:
-            price = sh - ratio * diff
-            fib_levels.append({"price": round(price, 4), "label": label})
-
-    entry  = trade_levels.get("entry",  0)
-    stop   = trade_levels.get("stop",   0)
-    target = trade_levels.get("target", 0)
-
-    # Serialize everything
-    ohlcv_js  = json.dumps(ohlcv)
-    volume_js = json.dumps(volume)
-    sma20_js  = json.dumps(sma20_data)
-    sma50_js  = json.dumps(sma50_data)
-    ema20_js  = json.dumps(ema20_data)
-    fib_js    = json.dumps(fib_levels)
-
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<script src="{LWC_CDN}"></script>
-<style>
-  * {{ margin:0; padding:0; box-sizing:border-box; }}
-  body {{ background:#0d1117; color:#e6edf3; font-family:monospace; }}
-  #title {{ padding:8px 12px; font-size:12px; color:#8b949e; }}
-  #chart {{ width:100%; height:420px; }}
-  #vol   {{ width:100%; height:100px; }}
-</style>
-</head>
-<body>
-<div id="title">{title}</div>
-<div id="chart"></div>
-<div id="vol"></div>
-<script>
-const LWC = LightweightCharts;
-
-// ── Main price chart ──────────────────────────────────────────────────────────
-const chartEl = document.getElementById('chart');
-const chart = LWC.createChart(chartEl, {{
-  width:  chartEl.clientWidth,
-  height: 420,
-  layout: {{
-    background: {{ color: '#161b22' }},
-    textColor:  '#8b949e',
-  }},
-  grid: {{
-    vertLines: {{ color: '#21262d' }},
-    horzLines: {{ color: '#21262d' }},
-  }},
-  crosshair: {{ mode: LWC.CrosshairMode.Normal }},
-  rightPriceScale: {{ borderColor: '#30363d' }},
-  timeScale: {{
-    borderColor:    '#30363d',
-    timeVisible:    true,
-    secondsVisible: false,
-  }},
-}});
-
-// Candlestick series
-const candleSeries = chart.addCandlestickSeries({{
-  upColor:         '#26a69a',
-  downColor:       '#ef5350',
-  borderUpColor:   '#26a69a',
-  borderDownColor: '#ef5350',
-  wickUpColor:     '#26a69a',
-  wickDownColor:   '#ef5350',
-}});
-candleSeries.setData({ohlcv_js});
-
-// SMA 20
-const sma20 = chart.addLineSeries({{ color: '{C["sma20"]}', lineWidth: 1, title: 'SMA20' }});
-sma20.setData({sma20_js});
-
-// SMA 50
-const sma50 = chart.addLineSeries({{ color: '{C["sma50"]}', lineWidth: 1, title: 'SMA50' }});
-sma50.setData({sma50_js});
-
-// EMA 20
-const ema20 = chart.addLineSeries({{ color: '{C["ema20"]}', lineWidth: 1,
-  lineStyle: LWC.LineStyle.Dashed, title: 'EMA20' }});
-ema20.setData({ema20_js});
-
-// ── Trade levels as horizontal price lines ────────────────────────────────────
-{"candleSeries.createPriceLine({ price: " + str(entry) + ", color: '" + C["entry"] + "', lineWidth: 1, lineStyle: LWC.LineStyle.Dotted, axisLabelVisible: true, title: 'Entry' });" if entry > 0 else ""}
-{"candleSeries.createPriceLine({ price: " + str(stop) + ", color: '" + C["stop"] + "', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true, title: 'Stop' });" if stop > 0 else ""}
-{"candleSeries.createPriceLine({ price: " + str(target) + ", color: '" + C["target"] + "', lineWidth: 1, lineStyle: LWC.LineStyle.Dashed, axisLabelVisible: true, title: 'Target' });" if target > 0 else ""}
-
-// ── Fibonacci price lines ─────────────────────────────────────────────────────
-const fibLevels = {fib_js};
-fibLevels.forEach(function(f) {{
-  candleSeries.createPriceLine({{
-    price:             f.price,
-    color:             '{C["fib"]}',
-    lineWidth:         1,
-    lineStyle:         LWC.LineStyle.Dotted,
-    axisLabelVisible:  false,
-    title:             f.label,
-  }});
-}});
-
-// Fit content
-chart.timeScale().fitContent();
-
-// ── Volume chart ──────────────────────────────────────────────────────────────
-const volEl = document.getElementById('vol');
-const volChart = LWC.createChart(volEl, {{
-  width:  volEl.clientWidth,
-  height: 100,
-  layout: {{ background: {{ color: '#0d1117' }}, textColor: '#8b949e' }},
-  grid:   {{ vertLines: {{ color: '#21262d' }}, horzLines: {{ color: '#21262d' }} }},
-  rightPriceScale: {{ borderColor: '#30363d' }},
-  timeScale: {{
-    borderColor: '#30363d',
-    timeVisible: true,
-    secondsVisible: false,
-  }},
-}});
-const volSeries = volChart.addHistogramSeries({{ priceFormat: {{ type: 'volume' }} }});
-volSeries.setData({volume_js});
-volChart.timeScale().fitContent();
-
-// ── Sync crosshair and scroll between charts ──────────────────────────────────
-chart.timeScale().subscribeVisibleLogicalRangeChange(function(range) {{
-  if (range) volChart.timeScale().setVisibleLogicalRange(range);
-}});
-volChart.timeScale().subscribeVisibleLogicalRangeChange(function(range) {{
-  if (range) chart.timeScale().setVisibleLogicalRange(range);
-}});
-
-// Responsive resize
-window.addEventListener('resize', function() {{
-  chart.applyOptions({{ width: chartEl.clientWidth }});
-  volChart.applyOptions({{ width: volEl.clientWidth }});
-}});
-</script>
-</body>
-</html>"""
-    return html
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PLOTLY SUB-PANELS (RSI, ADX, Radar)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def build_rsi_chart(df: pd.DataFrame) -> go.Figure:
     close = df["close"].values
-    delta = np.diff(close, prepend=close[0])
-    gain  = np.where(delta > 0, delta, 0.0)
-    loss  = np.where(delta < 0, -delta, 0.0)
 
-    def _rm(arr, n=14):
-        out = np.full(len(arr), np.nan)
-        for i in range(n-1, len(arr)):
-            out[i] = arr[i-n+1:i+1].mean()
-        return out
+    def rm(a,n):
+        o=[None]*len(a)
+        for i in range(n-1,len(a)): o[i]=float(np.mean(a[i-n+1:i+1]))
+        return o
 
-    ag, al = _rm(gain), _rm(loss)
-    rsi = 100 - (100 / (1 + ag / (al + 1e-10)))
-    x   = list(range(len(df)))
+    def ec(a,n):
+        o,k=[None]*len(a),2/(n+1); o[0]=float(a[0])
+        for i in range(1,len(a)): o[i]=float(a[i])*k+o[i-1]*(1-k)
+        return o
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=rsi, line=dict(color=C["rsi"], width=1.2),
-                             name="RSI 14"))
-    fig.add_hline(y=70, line_dash="dot", line_color=C["bear"],  line_width=0.8)
-    fig.add_hline(y=50, line_dash="dot", line_color=C["muted"], line_width=0.6)
-    fig.add_hline(y=30, line_dash="dot", line_color=C["bull"],  line_width=0.8)
-    fig.add_hrect(y0=70, y1=100, fillcolor=C["bear"], opacity=0.05, line_width=0)
-    fig.add_hrect(y0=0,  y1=30,  fillcolor=C["bull"], opacity=0.05, line_width=0)
-    fig.update_layout(
-        height=120, margin=dict(l=5,r=5,t=5,b=5),
-        paper_bgcolor=C["bg"], plot_bgcolor=C["panel"],
-        font=dict(color=C["muted"], size=9),
-        showlegend=False,
-        yaxis=dict(range=[0,100], tickvals=[30,50,70], gridcolor=C["border"]),
-        xaxis=dict(showticklabels=False, gridcolor=C["border"]),
-    )
-    return fig
+    s20,s50,e20 = rm(close,20),rm(close,50),ec(close,20)
+
+    def jcandle():
+        o=[]
+        for idx,r in df.iterrows():
+            try: o.append({"time":int(pd.Timestamp(idx).timestamp()),"open":round(float(r["open"]),4),"high":round(float(r["high"]),4),"low":round(float(r["low"]),4),"close":round(float(r["close"]),4)})
+            except: pass
+        return json.dumps(o)
+
+    def jvol():
+        o=[]
+        for idx,r in df.iterrows():
+            try:
+                bull=r["close"]>=r["open"]
+                o.append({"time":int(pd.Timestamp(idx).timestamp()),"value":int(r["volume"]),"color":"rgba(38,166,154,0.45)" if bull else "rgba(239,83,80,0.45)"})
+            except: pass
+        return json.dumps(o)
+
+    def jline(vals):
+        o=[]
+        for idx,v in zip(df.index,vals):
+            if v is None: continue
+            try: o.append({"time":int(pd.Timestamp(idx).timestamp()),"value":round(v,4)})
+            except: pass
+        return json.dumps(o)
+
+    def jflat(p):
+        o=[]
+        for idx in df.index:
+            try: o.append({"time":int(pd.Timestamp(idx).timestamp()),"value":round(float(p),4)})
+            except: pass
+        return json.dumps(o)
+
+    jc=jcandle(); jv=jvol(); j20=jline(s20); j50=jline(s50); je=jline(e20)
+
+    entry=float(row.get("entry",0)); stop=float(row.get("stop",0))
+    target=float(row.get("target",0)); shares=int(row.get("shares",1))
+
+    # Fib lines
+    fib=""
+    slo=row.get("swing_low"); shi=row.get("swing_high")
+    if slo and shi and float(shi)>float(slo)>0:
+        d=float(shi)-float(slo)
+        for r2,l in [(0.382,"0.382"),(0.5,"0.5"),(0.618,"0.618")]:
+            p=round(float(shi)-r2*d,4)
+            fib+="cs.createPriceLine({price:"+str(p)+",color:'rgba(255,215,0,0.22)',lineWidth:1,lineStyle:LWC.LineStyle.Dotted,axisLabelVisible:false,title:'"+l+"'});\n"
+
+    # Header chips
+    chips=""
+    if entry>0:
+        chips+='<span class="chip en"><span class="cl">ENTRY</span><span class="cv">$'+f"{entry:.2f}"+'</span></span>'
+    if stop>0 and entry>stop:
+        ru=round((entry-stop)*shares,2)
+        chips+='<span class="chip sl"><span class="cl">STOP</span><span class="cv">$'+f"{stop:.2f}"+'</span><span class="cs">&#8209;$'+f"{ru}"+'</span></span>'
+    if target>0 and entry>0 and target>entry:
+        ru=round((target-entry)*shares,2)
+        rr=round((target-entry)/(entry-stop),2) if stop>0 and entry>stop else 0
+        chips+='<span class="chip tp"><span class="cl">TARGET</span><span class="cv">$'+f"{target:.2f}"+'</span><span class="cs">+$'+f"{ru}"+'</span></span>'
+        if rr>0: chips+='<span class="chip rr"><span class="cl">R:R</span><span class="cv">'+f"{rr}:1"+'</span></span>'
+
+    # Level lines (left scale) and zone (right scale baseline)
+    lvl_lines=""
+    if entry>0:
+        lvl_lines+="lvl.createPriceLine({price:"+str(round(entry,4))+",color:'#ffffff',lineWidth:2,lineStyle:LWC.LineStyle.Solid,axisLabelVisible:true,title:'\\u2500 Entry'});\n"
+    if stop>0 and entry>stop:
+        lvl_lines+="lvl.createPriceLine({price:"+str(round(stop,4))+",color:'#ef5350',lineWidth:1.5,lineStyle:LWC.LineStyle.Dashed,axisLabelVisible:true,title:'\\u25bc SL'});\n"
+    if target>0 and entry>0 and target>entry:
+        lvl_lines+="lvl.createPriceLine({price:"+str(round(target,4))+",color:'#26a69a',lineWidth:1.5,lineStyle:LWC.LineStyle.Dashed,axisLabelVisible:true,title:'\\u25b2 TP'});\n"
+
+    zone=""
+    if entry>0 and stop>0 and target>0 and entry>stop and target>entry:
+        jb=jflat(entry)
+        zone=("const bl=chart.addBaselineSeries({baseValue:{type:'price',price:"+str(round(entry,4))+"},topFillColor1:'rgba(38,166,154,0.28)',topFillColor2:'rgba(38,166,154,0.05)',topLineColor:'rgba(38,166,154,0)',bottomFillColor1:'rgba(239,83,80,0.05)',bottomFillColor2:'rgba(239,83,80,0.25)',bottomLineColor:'rgba(239,83,80,0)',lineWidth:0,lastValueVisible:false,crosshairMarkerVisible:false,priceScaleId:'right'});\n"
+              "bl.setData("+jb+");\n")
+
+    # Invisible left-scale anchor series for price lines
+    mid=round((stop+target)/2,4) if stop and target else round(entry,4)
+    jmid=jflat(mid)
+    mn=round(min(stop,entry,target)*0.97,4) if stop and entry and target else 0
+    mx=round(max(stop,entry,target)*1.03,4) if stop and entry and target else 0
+    lvl_series=("const lvl=chart.addLineSeries({priceScaleId:'left',color:'rgba(0,0,0,0)',lineWidth:1,lastValueVisible:false,crosshairMarkerVisible:false"
+                +((",autoscaleInfoProvider:()=>({priceRange:{minValue:"+str(mn)+",maxValue:"+str(mx)+"},margins:{above:10,below:10}})") if mn and mx else "")
+                +"});\n"
+                "lvl.setData("+jmid+");\n")
+
+    css=("<style>*{margin:0;padding:0;box-sizing:border-box}"
+         "body{background:"+BG+";color:"+TEXT+";font-family:'SF Mono',monospace;font-size:11px}"
+         "#hdr{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:6px 10px;background:"+BG+";border-bottom:1px solid "+BORDER+"}"
+         ".ttl{color:"+MUTED+";margin-right:4px}"
+         ".chip{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;border:1px solid transparent}"
+         ".chip.en{background:rgba(255,255,255,0.10);border-color:rgba(255,255,255,0.28);color:#fff}"
+         ".chip.sl{background:rgba(239,83,80,0.14);border-color:rgba(239,83,80,0.45);color:#ef5350}"
+         ".chip.tp{background:rgba(38,166,154,0.12);border-color:rgba(38,166,154,0.4);color:#26a69a}"
+         ".chip.rr{background:rgba(88,166,255,0.10);border-color:rgba(88,166,255,0.35);color:#58a6ff}"
+         ".cl{font-size:9px;opacity:0.65;letter-spacing:0.5px}.cv{font-weight:bold;font-size:12px}.cs{font-size:9px;opacity:0.75}"
+         "#c{width:100%;height:390px}#v{width:100%;height:85px}</style>")
+
+    opts=("const LWC=LightweightCharts;"
+          "const OPTS={layout:{background:{color:'"+PANEL+"'},textColor:'"+MUTED+"'},grid:{vertLines:{color:'"+BORDER+"'},horzLines:{color:'"+BORDER+"'}},crosshair:{mode:LWC.CrosshairMode.Normal},"
+          "leftPriceScale:{visible:true,borderColor:'"+BORDER+"',textColor:'"+MUTED+"',entireTextOnly:true},"
+          "rightPriceScale:{borderColor:'"+BORDER+"'},timeScale:{borderColor:'"+BORDER+"',timeVisible:true,secondsVisible:false}};")
+
+    ma_js=("chart.addLineSeries({color:'"+SMA20C+"',lineWidth:1.2,title:'SMA20',lastValueVisible:false,crosshairMarkerVisible:false,priceScaleId:'right'}).setData("+j20+");\n"
+           "chart.addLineSeries({color:'"+SMA50C+"',lineWidth:1.2,title:'SMA50',lastValueVisible:false,crosshairMarkerVisible:false,priceScaleId:'right'}).setData("+j50+");\n"
+           "chart.addLineSeries({color:'"+EMA20C+"',lineWidth:1,lineStyle:LWC.LineStyle.Dashed,title:'EMA20',lastValueVisible:false,crosshairMarkerVisible:false,priceScaleId:'right'}).setData("+je+");\n")
+
+    return ("<!DOCTYPE html><html><head><meta charset='utf-8'><script src='"+LWC_SRC+"'></script>"+css+"</head><body>"
+            "<div id='hdr'><span class='ttl'>"+title+"</span>"+chips+"</div>"
+            "<div id='c'></div><div id='v'></div><script>"
+            +opts+
+            "const chart=LWC.createChart(document.getElementById('c'),{...OPTS,width:document.getElementById('c').clientWidth,height:390});\n"
+            +zone+
+            "const cs=chart.addCandlestickSeries({upColor:'"+BULL+"',downColor:'"+BEAR+"',borderUpColor:'"+BULL+"',borderDownColor:'"+BEAR+"',wickUpColor:'"+BULL+"',wickDownColor:'"+BEAR+"',priceScaleId:'right'});\n"
+            "cs.setData("+jc+");\n"
+            +ma_js+fib+lvl_series+lvl_lines+
+            "chart.timeScale().fitContent();\n"
+            "const vc=LWC.createChart(document.getElementById('v'),{...OPTS,width:document.getElementById('v').clientWidth,height:85});\n"
+            "vc.addHistogramSeries({priceFormat:{type:'volume'}}).setData("+jv+");\n"
+            "vc.timeScale().fitContent();\n"
+            "chart.timeScale().subscribeVisibleLogicalRangeChange(r=>{if(r)vc.timeScale().setVisibleLogicalRange(r)});\n"
+            "vc.timeScale().subscribeVisibleLogicalRangeChange(r=>{if(r)chart.timeScale().setVisibleLogicalRange(r)});\n"
+            "window.addEventListener('resize',()=>{chart.applyOptions({width:document.getElementById('c').clientWidth});vc.applyOptions({width:document.getElementById('v').clientWidth})});\n"
+            "</script></body></html>")
 
 
-def build_adx_chart(df: pd.DataFrame) -> go.Figure:
-    h, l, c = df["high"].values, df["low"].values, df["close"].values
-
-    def _rm(arr, n=14):
-        out = np.full(len(arr), np.nan)
-        for i in range(n-1, len(arr)):
-            out[i] = arr[i-n+1:i+1].mean()
-        return out
-
-    up  = np.diff(h, prepend=h[0])
-    dn  = -np.diff(l, prepend=l[0])
-    pdm = np.where((up > dn) & (up > 0), up, 0.0)
-    mdm = np.where((dn > up) & (dn > 0), dn, 0.0)
-    tr  = np.maximum(h-l, np.maximum(np.abs(h-np.roll(c,1)), np.abs(l-np.roll(c,1))))
-    atr = _rm(tr)
-    pdi = 100 * _rm(pdm) / (atr + 1e-10)
-    mdi = 100 * _rm(mdm) / (atr + 1e-10)
-    dx  = 100 * np.abs(pdi - mdi) / (pdi + mdi + 1e-10)
-    adx = _rm(dx)
-    x   = list(range(len(df)))
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=adx, line=dict(color=C["adx"],  width=1.2), name="ADX"))
-    fig.add_trace(go.Scatter(x=x, y=pdi, line=dict(color=C["bull"], width=0.8), name="+DI"))
-    fig.add_trace(go.Scatter(x=x, y=mdi, line=dict(color=C["bear"], width=0.8), name="-DI"))
-    fig.add_hline(y=25, line_dash="dot", line_color=C["muted"], line_width=0.7)
-    fig.update_layout(
-        height=120, margin=dict(l=5,r=5,t=5,b=5),
-        paper_bgcolor=C["bg"], plot_bgcolor=C["panel"],
-        font=dict(color=C["muted"], size=9),
-        legend=dict(orientation="h", y=1.0, font=dict(size=8),
-                    bgcolor="rgba(0,0,0,0)"),
-        yaxis=dict(range=[0,60], gridcolor=C["border"]),
-        xaxis=dict(showticklabels=False, gridcolor=C["border"]),
-    )
-    return fig
-
-
-def build_radar_chart(row: dict) -> go.Figure:
-    cats   = ["Trend", "Pattern", "RS", "RVOL", "RSI", "R:R", "ATR", "OBV"]
-    keys   = ["c_trend", "c_pattern", "c_rs", "c_rvol", "c_rsi", "c_rr", "c_atr", "c_obv"]
-    vals   = [float(row.get(k, 0)) for k in keys]
-    score  = float(row.get("score", 0))
-
-    color = C["bull"] if score >= 60 else ("#ff9800" if score >= 45 else C["bear"])
-    fill  = f"rgba(38,166,154,0.2)" if score >= 60 else (
-            f"rgba(255,152,0,0.2)"  if score >= 45 else "rgba(239,83,80,0.15)")
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(
-        r=vals + [vals[0]], theta=cats + [cats[0]],
-        fill="toself", fillcolor=fill,
-        line=dict(color=color, width=2),
-        hovertemplate="%{theta}: %{r:.2f}<extra></extra>",
-    ))
-    fig.update_layout(
-        height=280, margin=dict(l=20,r=20,t=30,b=20),
-        paper_bgcolor=C["bg"],
-        polar=dict(
-            bgcolor=C["panel"],
-            radialaxis=dict(range=[0,1], showticklabels=False,
-                            gridcolor=C["border"]),
-            angularaxis=dict(gridcolor=C["border"],
-                             tickfont=dict(color=C["text"], size=10)),
-        ),
-        showlegend=False,
-        title=dict(text=f"Score: {score:.0f}", font=dict(color=C["text"], size=12)),
-    )
-    return fig
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# DASH APP
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def build_app(cfg: dict, data_store: dict = None,
-              results_csv: str = None) -> "dash.Dash":
-
-    if not DASH_AVAILABLE:
-        raise ImportError("pip install dash plotly")
-
-    # Auto-detect latest CSV if not specified
-    if results_csv is None:
-        scan_dir = Path(__file__).parent / "Scan_result"
-        csv_files = sorted(scan_dir.glob("*.csv"), key=lambda f: f.stat().st_mtime, reverse=True)
-        if csv_files:
-            results_csv = str(csv_files[0])
-        else:
-            results_csv = "watchlist.csv"
+def _img_b64(path: Path) -> str:
+    """Load a PNG as base64 for embedding in Dash."""
+    if not path or not path.exists():
+        return ""
     try:
-        df_wl = pd.read_csv(results_csv).fillna(0)
-    except FileNotFoundError:
-        logger.warning(f"{results_csv} not found — run scanner + filter first")
-        df_wl = pd.DataFrame(columns=["ticker", "score"])
-
-    data_store = data_store or {}
-
-    TABLE_COLS = ["ticker", "score", "price", "pattern", "rsi",
-                  "adx", "rvol", "rr", "entry", "stop", "target"]
-    table_cols = [c for c in TABLE_COLS if c in df_wl.columns]
-
-    col_defs = []
-    for c in table_cols:
-        is_text = c in ("ticker", "pattern")
-        col_defs.append({
-            "name": c.upper().replace("_", " "),
-            "id":   c,
-            "type": "text" if is_text else "numeric",
-            **({"format": {"specifier": ".2f"}} if not is_text else {}),
-        })
-
-    app = dash.Dash(__name__, title="Swing Scanner",
-                    suppress_callback_exceptions=True)
-
-    # ── Layout ────────────────────────────────────────────────────────────────
-    app.layout = html.Div(
-        style={"backgroundColor": C["bg"], "minHeight": "100vh",
-               "padding": "12px", "fontFamily": "monospace"},
-        children=[
-
-            # Regime banner
-            html.Div(id="regime-banner", style={
-                "padding": "8px 16px", "marginBottom": "12px",
-                "borderRadius": "6px", "backgroundColor": C["panel"],
-                "color": C["muted"], "fontSize": "13px",
-            }, children="Run scanner to load regime"),
-
-            # Controls bar
-            html.Div(style={"display": "flex", "gap": "16px",
-                            "marginBottom": "10px", "alignItems": "center"}, children=[
-                html.Label("Pattern:", style={"color": C["muted"], "fontSize": "12px"}),
-                dcc.Dropdown(
-                    id="pattern-filter",
-                    options=[{"label": x, "value": x} for x in
-                             ["all", "breakout", "pullback", "squeeze"]],
-                    value="all", clearable=False,
-                    style={"width": "140px", "fontSize": "12px"},
-                ),
-                html.Label("Min score:", style={"color": C["muted"], "fontSize": "12px"}),
-                dcc.Slider(id="score-slider", min=0, max=100, step=5,
-                           value=int(cfg.get("min_score_display", 40)),
-                           marks={i: str(i) for i in range(0, 101, 20)},
-                           tooltip={"placement": "bottom"}),
-                html.Label("Bars:", style={"color": C["muted"], "fontSize": "12px"}),
-                dcc.Slider(id="bars-slider", min=30, max=200, step=10,
-                           value=80, marks={30:"30", 80:"80", 150:"150", 200:"200"},
-                           tooltip={"placement": "bottom"}),
-            ]),
-
-            # Main layout: left table | right charts
-            html.Div(style={"display": "flex", "gap": "12px"}, children=[
-
-                # Left: watchlist table + radar
-                html.Div(style={"width": "420px", "flexShrink": "0"}, children=[
-                    html.Div("WATCHLIST", style={"color": C["muted"],
-                                                  "fontSize": "10px",
-                                                  "letterSpacing": "1px",
-                                                  "marginBottom": "6px"}),
-                    dash_table.DataTable(
-                        id="watchlist-table",
-                        columns=col_defs,
-                        data=df_wl[table_cols].to_dict("records"),
-                        row_selectable="single",
-                        selected_rows=[0],
-                        sort_action="native",
-                        page_size=18,
-                        style_table={"overflowX": "auto"},
-                        style_cell={
-                            "backgroundColor": C["panel"],
-                            "color":           C["text"],
-                            "border":          f"1px solid {C['border']}",
-                            "padding":         "6px 10px",
-                            "fontSize":        "12px",
-                            "textAlign":       "right",
-                        },
-                        style_header={
-                            "backgroundColor": C["bg"],
-                            "color":           C["muted"],
-                            "fontSize":        "10px",
-                            "fontWeight":      "bold",
-                            "border":          f"1px solid {C['border']}",
-                        },
-                        style_data_conditional=[
-                            {"if": {"row_index": "odd"},
-                             "backgroundColor": "#1c2128"},
-                            {"if": {"state": "selected"},
-                             "backgroundColor": "#1f3d5c",
-                             "border": f"1px solid {C['accent']}"},
-                            {"if": {"filter_query": '{score} >= 70'},
-                             "fontWeight": "bold"},
-                            {"if": {"filter_query": '{pattern} = "breakout"'},
-                             "color": C["bull"]},
-                            {"if": {"filter_query": '{pattern} = "pullback"'},
-                             "color": C["accent"]},
-                            {"if": {"filter_query": '{pattern} = "squeeze"'},
-                             "color": "#ff9800"},
-                        ],
-                        style_cell_conditional=[
-                            {"if": {"column_id": "ticker"},
-                             "textAlign": "left", "fontWeight": "bold"},
-                            {"if": {"column_id": "pattern"},
-                             "textAlign": "center"},
-                        ],
-                    ),
-                    # Radar chart below table
-                    html.Div(style={"marginTop": "10px"}, children=[
-                        dcc.Graph(id="radar-chart",
-                                  config={"displayModeBar": False})
-                    ]),
-                ]),
-
-                # Right: LWC chart + RSI + ADX
-                html.Div(style={"flex": "1", "minWidth": "0"}, children=[
-                    # TradingView Lightweight Charts in iframe
-                    html.Iframe(
-                        id="lwc-frame",
-                        srcDoc="",
-                        style={
-                            "width":   "100%",
-                            "height":  "540px",
-                            "border":  f"1px solid {C['border']}",
-                            "borderRadius": "6px",
-                            "background":   C["panel"],
-                        },
-                    ),
-                    # RSI
-                    html.Div(style={"marginTop": "6px"}, children=[
-                        dcc.Graph(id="rsi-chart",
-                                  config={"displayModeBar": False}),
-                    ]),
-                    # ADX
-                    html.Div(style={"marginTop": "4px"}, children=[
-                        dcc.Graph(id="adx-chart",
-                                  config={"displayModeBar": False}),
-                    ]),
-                ]),
-            ]),
-
-            # Hidden stores
-            dcc.Store(id="selected-ticker", data=""),
-            dcc.Interval(id="refresh-interval",
-                         interval=cfg.get("dashboard_refresh_sec", 300) * 1000,
-                         n_intervals=0),
-        ]
-    )
-
-    # ── Callbacks ─────────────────────────────────────────────────────────────
-
-    @app.callback(
-        Output("watchlist-table", "data"),
-        Input("pattern-filter",  "value"),
-        Input("score-slider",    "value"),
-    )
-    def filter_table(pattern, min_score):
-        df = df_wl.copy()
-        if pattern != "all" and "pattern" in df.columns:
-            df = df[df["pattern"] == pattern]
-        if "score" in df.columns:
-            df = df[df["score"] >= min_score]
-        return df[table_cols].to_dict("records")
-
-    @app.callback(
-        Output("lwc-frame",   "srcDoc"),
-        Output("rsi-chart",   "figure"),
-        Output("adx-chart",   "figure"),
-        Output("radar-chart", "figure"),
-        Input("watchlist-table", "selected_rows"),
-        Input("watchlist-table", "data"),
-        Input("bars-slider",     "value"),
-    )
-    def update_charts(selected_rows, table_data, n_bars):
-        empty_fig = _empty_fig()
-
-        if not selected_rows or not table_data:
-            return "", empty_fig, empty_fig, empty_fig
-
-        row    = table_data[selected_rows[0]]
-        ticker = row.get("ticker", "")
-
-        # Full row from original df for component scores
-        matches  = df_wl[df_wl["ticker"] == ticker]
-        full_row = matches.iloc[0].to_dict() if not matches.empty else row
-
-        # Get OHLCV from data_store
-        df = data_store.get(ticker, pd.DataFrame())
-        if df.empty:
-            return (_no_data_html(ticker), empty_fig, empty_fig,
-                    build_radar_chart(full_row))
-
-        df_plot = df.iloc[-n_bars:]
-
-        # Compute MAs for LWC
-        close   = df_plot["close"]
-        inds    = {
-            "sma20": close.rolling(20).mean(),
-            "sma50": close.rolling(50).mean(),
-            "ema20": close.ewm(span=20, adjust=False).mean(),
-        }
-
-        trade_levels = {
-            "entry":      float(row.get("entry",      0)),
-            "stop":       float(row.get("stop",       0)),
-            "target":     float(row.get("target",     0)),
-            "swing_low":  float(row.get("swing_low",  df_plot["low"].min())),
-            "swing_high": float(row.get("swing_high", df_plot["high"].max())),
-        }
-
-        title = (f"{ticker}  |  {row.get('pattern','').upper()}  |  "
-                 f"Score {row.get('score',0):.0f}  |  R:R {row.get('rr',0):.1f}:1")
-
-        lwc_html = build_lwc_html(df_plot, inds, trade_levels, title)
-        rsi_fig  = build_rsi_chart(df_plot)
-        adx_fig  = build_adx_chart(df_plot)
-        radar    = build_radar_chart(full_row)
-
-        return lwc_html, rsi_fig, adx_fig, radar
-
-    return app
+        return base64.b64encode(path.read_bytes()).decode()
+    except Exception:
+        return ""
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _empty_fig() -> go.Figure:
+def _rsi_fig(df: pd.DataFrame) -> "go.Figure":
+    import numpy as np
+    c = df["close"].values
+    d = np.diff(c, prepend=c[0])
+    g, l = np.where(d>0,d,0.0), np.where(d<0,-d,0.0)
+    def rm(a,n=14):
+        o=np.full(len(a),np.nan)
+        for i in range(n-1,len(a)): o[i]=a[i-n+1:i+1].mean()
+        return o
+    rsi = 100-(100/(1+rm(g)/(rm(l)+1e-10)))
+    x   = list(range(len(df)))
     fig = go.Figure()
-    fig.update_layout(
-        height=120, margin=dict(l=5,r=5,t=5,b=5),
-        paper_bgcolor=C["bg"], plot_bgcolor=C["panel"],
-        font=dict(color=C["muted"]),
-    )
+    fig.add_trace(go.Scatter(x=x,y=rsi,line=dict(color=C["rsi"],width=1.2),name="RSI"))
+    fig.add_hline(y=70,line_dash="dot",line_color=C["bear"],  line_width=0.8)
+    fig.add_hline(y=50,line_dash="dot",line_color=C["muted"], line_width=0.6)
+    fig.add_hline(y=30,line_dash="dot",line_color=C["bull"],  line_width=0.8)
+    fig.update_layout(height=100,margin=dict(l=5,r=5,t=2,b=2),
+                      paper_bgcolor=C["bg"],plot_bgcolor=C["panel"],
+                      font=dict(color=C["muted"],size=8),showlegend=False,
+                      yaxis=dict(range=[0,100],tickvals=[30,50,70],gridcolor=C["border"]),
+                      xaxis=dict(showticklabels=False,gridcolor=C["border"]))
+    return fig
+
+
+def _adx_fig(df: pd.DataFrame) -> "go.Figure":
+    import numpy as np
+    h,l,c=df["high"].values,df["low"].values,df["close"].values
+    def rm(a,n=14):
+        o=np.full(len(a),np.nan)
+        for i in range(n-1,len(a)): o[i]=a[i-n+1:i+1].mean()
+        return o
+    up=np.diff(h,prepend=h[0]); dn=-np.diff(l,prepend=l[0])
+    pdm=np.where((up>dn)&(up>0),up,0.0); mdm=np.where((dn>up)&(dn>0),dn,0.0)
+    tr=np.maximum(h-l,np.maximum(np.abs(h-np.roll(c,1)),np.abs(l-np.roll(c,1))))
+    atr=rm(tr); pdi=100*rm(pdm)/(atr+1e-10); mdi=100*rm(mdm)/(atr+1e-10)
+    adx=rm(100*np.abs(pdi-mdi)/(pdi+mdi+1e-10))
+    x=list(range(len(df)))
+    fig=go.Figure()
+    fig.add_trace(go.Scatter(x=x,y=adx,line=dict(color=C["adx"],width=1.2),name="ADX"))
+    fig.add_trace(go.Scatter(x=x,y=pdi,line=dict(color=C["bull"],width=0.8),name="+DI"))
+    fig.add_trace(go.Scatter(x=x,y=mdi,line=dict(color=C["bear"],width=0.8),name="-DI"))
+    fig.add_hline(y=25,line_dash="dot",line_color=C["muted"],line_width=0.7)
+    fig.update_layout(height=100,margin=dict(l=5,r=5,t=2,b=2),
+                      paper_bgcolor=C["bg"],plot_bgcolor=C["panel"],
+                      font=dict(color=C["muted"],size=8),
+                      legend=dict(orientation="h",y=1,font=dict(size=7),bgcolor="rgba(0,0,0,0)"),
+                      yaxis=dict(range=[0,60],gridcolor=C["border"]),
+                      xaxis=dict(showticklabels=False,gridcolor=C["border"]))
+    return fig
+
+
+def _radar_fig(row: dict) -> "go.Figure":
+    cats = ["Trend","Pattern","RS","RVOL","RSI","R:R","ATR","OBV"]
+    keys = ["c_trend","c_pattern","c_rs","c_rvol","c_rsi","c_rr","c_atr","c_obv"]
+    vals = [float(row.get(k,0)) for k in keys]
+    score= float(row.get("score",0))
+    col  = C["bull"] if score>=60 else (C["warn"] if score>=45 else C["bear"])
+    fill = ("rgba(38,166,154,0.2)" if score>=60 else
+            "rgba(255,152,0,0.2)"  if score>=45 else "rgba(239,83,80,0.15)")
+    fig=go.Figure()
+    fig.add_trace(go.Scatterpolar(r=vals+[vals[0]],theta=cats+[cats[0]],
+        fill="toself",fillcolor=fill,line=dict(color=col,width=2)))
+    fig.update_layout(height=240,margin=dict(l=15,r=15,t=30,b=10),
+        paper_bgcolor=C["bg"],
+        polar=dict(bgcolor=C["panel"],
+                   radialaxis=dict(range=[0,1],showticklabels=False,
+                                   gridcolor=C["border"]),
+                   angularaxis=dict(gridcolor=C["border"],
+                                    tickfont=dict(color=C["text"],size=9))),
+        showlegend=False,
+        title=dict(text=f"Score: {score:.0f}",
+                   font=dict(color=C["text"],size=11)))
+    return fig
+
+
+def _empty_fig(h=100):
+    fig=go.Figure()
+    fig.update_layout(height=h,margin=dict(l=5,r=5,t=2,b=2),
+                      paper_bgcolor=C["bg"],plot_bgcolor=C["panel"])
     return fig
 
 
 def _no_data_html(ticker: str) -> str:
-    return f"""<html><body style="background:{C['bg']};color:{C['muted']};
-font-family:monospace;padding:30px;font-size:13px">
-{ticker} — no OHLCV data in memory.<br>
-Pass <code>data_store={{ticker: df}}</code> to <code>build_app()</code>.
-</body></html>"""
+    msg = (f"Fetching data for {ticker}..." if ticker
+           else "Select a ticker from the watchlist")
+    return (f"<html><body style='background:{C['bg']};color:{C['muted']};"
+            f"font-family:monospace;padding:40px;font-size:13px'>{msg}</body></html>")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYOUT HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _label(text):
+    return html.Span(text, style={"color":C["muted"],"fontSize":"10px",
+                                   "letterSpacing":"1px","textTransform":"uppercase"})
+
+
+def _stat(label, value, color=None):
+    return html.Div([
+        html.Div(label, style={"color":C["muted"],"fontSize":"10px"}),
+        html.Div(value, style={"color":color or C["text"],
+                                "fontSize":"20px","fontWeight":"bold"}),
+    ], style={"textAlign":"center","minWidth":"80px"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# APP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _fetch_ticker(ticker: str, cfg: dict) -> pd.DataFrame:
+    """
+    Fetch OHLCV for a single ticker.
+
+    Priority:
+      1. ohlcv_cache/{ticker}.csv — written by bot from IB data
+      2. IB live fetch — if cache miss and IB is reachable
+      3. Empty DataFrame — chart will show "no data" message
+    """
+    from pathlib import Path
+
+    # Try disk cache first
+    cache_path = Path(cfg.get("ohlcv_cache_dir", "ohlcv_cache")) / f"{ticker}.csv"
+    if cache_path.exists():
+        try:
+            df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+            df.columns = [c.lower() for c in df.columns]
+            if {"open","high","low","close","volume"}.issubset(df.columns):
+                log.info(f"[{ticker}] loaded from ohlcv_cache/")
+                return df
+        except Exception as e:
+            log.warning(f"Cache read failed {ticker}: {e}")
+
+    # Cache miss — try IB live fetch
+    log.info(f"[{ticker}] not in cache, attempting IB fetch...")
+    try:
+        import asyncio
+        from ib_client import get_client
+        async def _fetch():
+            client = get_client(cfg)
+            await client.connect()
+            df = await client.fetch_historical_stock(ticker)
+            await client.disconnect()
+            return df
+        df = asyncio.run(_fetch())
+        if not df.empty:
+            # Save to cache for next time
+            from bot import _save_ohlcv_cache
+            _save_ohlcv_cache({ticker: df}, cfg)
+        return df
+    except Exception as e:
+        log.warning(f"IB fetch failed for {ticker}: {e}. "
+                    f"Run bot first to populate ohlcv_cache/.")
+        return pd.DataFrame()
+
+
+def build_app(cfg: dict, data_store: dict = None) -> "dash.Dash":
+    if not DASH_OK:
+        raise ImportError("pip install dash plotly")
+
+    data_store = data_store or {}
+
+    app = dash.Dash(__name__, title="Swing Scanner",
+                    suppress_callback_exceptions=True)
+    app.layout = _build_layout(cfg)
+    _register_callbacks(app, cfg, data_store)
+    return app
+
+
+def _build_layout(cfg: dict):
+    TABLE_COLS = ["ticker","score","pattern","rsi","adx","rvol","rr",
+                  "entry","stop","target","status"]
+    col_defs = [{"name": c.upper().replace("_"," "), "id": c,
+                 "type": "text" if c in ("ticker","pattern","status") else "numeric",
+                 **({} if c in ("ticker","pattern","status")
+                    else {"format":{"specifier":".2f"}})}
+                for c in TABLE_COLS]
+
+    return html.Div(style={"backgroundColor":C["bg"],"minHeight":"100vh",
+                           "padding":"10px","fontFamily":"monospace",
+                           "color":C["text"]}, children=[
+
+        # ── Auto-refresh every 30s ─────────────────────────────────────────
+        dcc.Interval(id="refresh", interval=30_000, n_intervals=0),
+        dcc.Store(id="state-store", data={}),
+        # Central source of truth for which ticker is displayed.
+        # Written by: watchlist click, position card click, search bar.
+        # Read by: all chart/title callbacks.
+        dcc.Store(id="selected-ticker", data=""),
+
+        # ── Top bar: regime + session + stats ──────────────────────────────
+        _card(id="top-bar", children=[
+            html.Div(id="regime-banner", style={"marginBottom":"8px"}),
+            html.Div(id="stats-bar"),
+        ], style={"marginBottom":"10px"}),
+
+        # ── Main layout ────────────────────────────────────────────────────
+        html.Div(style={"display":"flex","gap":"10px"}, children=[
+
+            # Left column: watchlist + activity feed
+            html.Div(style={"width":"380px","flexShrink":"0",
+                            "display":"flex","flexDirection":"column","gap":"8px"},
+            children=[
+                _card(children=[
+                    html.Div(style={"display":"flex","justifyContent":"space-between",
+                                    "alignItems":"center","marginBottom":"6px"},
+                    children=[
+                        _label("Watchlist"),
+                        html.Div(style={"position":"relative"}, children=[
+                            dcc.Input(
+                                id="ticker-search",
+                                placeholder="⌕  AAPL, XOM…",
+                                debounce=False,
+                                type="text",
+                                autoComplete="off",
+                                style={"backgroundColor":C["bg"],"color":C["text"],
+                                       "border":f"1px solid {C['accent']}",
+                                       "borderRadius":"4px",
+                                       "padding":"4px 10px",
+                                       "fontSize":"12px","width":"150px",
+                                       "outline":"none",
+                                       "letterSpacing":"0.3px"},
+                            ),
+                        ]),
+                    ]),
+                    html.Div(style={"marginTop":"6px"}, children=[
+                        # Pattern filter
+                        html.Div(style={"display":"flex","gap":"8px",
+                                        "marginBottom":"6px","alignItems":"center"},
+                        children=[
+                            dcc.Dropdown(id="pat-filter",
+                                options=[{"label":x,"value":x}
+                                         for x in ["all","breakout","pullback","squeeze"]],
+                                value="all", clearable=False,
+                                style={"width":"130px","fontSize":"11px"}),
+                            html.Div(dcc.Slider(id="score-filter",min=0,max=100,step=5,
+                                       value=int(cfg.get("min_score_display",40)),
+                                       marks={0:"0",50:"50",100:"100"},
+                                       tooltip={"placement":"bottom"}),
+                                       style={"flex":"1"}),
+                        ]),
+                        dash_table.DataTable(
+                            id="watchlist-table",
+                            columns=col_defs,
+                            data=[],
+                            row_selectable="single",
+                            selected_rows=[0],
+                            sort_action="native",
+                            page_size=15,
+                            style_table={"overflowX":"auto"},
+                            style_cell={"backgroundColor":C["panel"],"color":C["text"],
+                                        "border":f"1px solid {C['border']}",
+                                        "padding":"5px 8px","fontSize":"11px",
+                                        "textAlign":"right"},
+                            style_header={"backgroundColor":C["bg"],"color":C["muted"],
+                                          "fontSize":"9px","fontWeight":"bold",
+                                          "border":f"1px solid {C['border']}"},
+                            style_data_conditional=[
+                                {"if":{"row_index":"odd"},"backgroundColor":"#1c2128"},
+                                {"if":{"state":"selected"},"backgroundColor":"#1f3d5c",
+                                 "border":f"1px solid {C['accent']}"},
+                                {"if":{"filter_query":'{pattern} = "breakout"'},
+                                 "color":C["bull"]},
+                                {"if":{"filter_query":'{pattern} = "pullback"'},
+                                 "color":C["accent"]},
+                                {"if":{"filter_query":'{pattern} = "squeeze"'},
+                                 "color":C["warn"]},
+                                {"if":{"filter_query":'{status} = "filled"'},
+                                 "fontWeight":"bold"},
+                            ],
+                            style_cell_conditional=[
+                                {"if":{"column_id":"ticker"},"textAlign":"left",
+                                 "fontWeight":"bold"},
+                                {"if":{"column_id":"pattern"},"textAlign":"center"},
+                                {"if":{"column_id":"status"},"textAlign":"center"},
+                            ],
+                        ),
+                    ]),
+                ]),
+
+                # Open positions
+                _card(children=[
+                    _label("Open Positions"),
+                    html.Div(id="positions-panel",style={"marginTop":"6px"}),
+                ]),
+
+                # Activity feed
+                _card(children=[
+                    _label("Activity Feed"),
+                    html.Div(id="activity-feed",style={"marginTop":"6px",
+                             "maxHeight":"200px","overflowY":"auto"}),
+                ]),
+            ]),
+
+            # Right column: ticker detail
+            html.Div(style={"flex":"1","minWidth":"0"}, children=[
+                _card(children=[
+                    html.Div(id="ticker-title",
+                             style={"fontSize":"14px","fontWeight":"bold",
+                                    "marginBottom":"8px","color":C["text"]}),
+                    dcc.Tabs(id="detail-tabs", value="strategy",
+                             style={"marginBottom":"8px"},
+                    children=[
+                        dcc.Tab(label="Strategy Chart", value="strategy",
+                                style={"color":C["muted"],"backgroundColor":C["bg"],
+                                       "fontSize":"11px","padding":"6px 12px"},
+                                selected_style={"color":C["text"],"backgroundColor":C["panel"],
+                                                "fontSize":"11px","padding":"6px 12px",
+                                                "borderTop":f"2px solid {C['accent']}"}),
+                        dcc.Tab(label="Pattern", value="pattern",
+                                style={"color":C["muted"],"backgroundColor":C["bg"],
+                                       "fontSize":"11px","padding":"6px 12px"},
+                                selected_style={"color":C["text"],"backgroundColor":C["panel"],
+                                                "fontSize":"11px","padding":"6px 12px",
+                                                "borderTop":f"2px solid {C['accent']}"}),
+                        dcc.Tab(label="Trade History", value="history",
+                                style={"color":C["muted"],"backgroundColor":C["bg"],
+                                       "fontSize":"11px","padding":"6px 12px"},
+                                selected_style={"color":C["text"],"backgroundColor":C["panel"],
+                                                "fontSize":"11px","padding":"6px 12px",
+                                                "borderTop":f"2px solid {C['accent']}"}),
+                    ]),
+
+                    # ── STRATEGY TAB (static IDs — always in DOM) ──────────
+                    html.Div(id="strategy-panel", children=[
+                        dcc.Loading(type="circle", color=C["accent"], children=[
+                            html.Iframe(id="lwc-frame", srcDoc="",
+                                style={"width":"100%","height":"510px",
+                                       "border":f"1px solid {C['border']}",
+                                       "borderRadius":"4px",
+                                       "background":C["panel"]}),
+                        ]),
+                        html.Div(style={"display":"flex","gap":"6px","marginTop":"6px"},
+                        children=[
+                            html.Div(dcc.Graph(id="rsi-chart",
+                                               figure=_empty_fig(),
+                                               config={"displayModeBar":False}),
+                                     style={"flex":"1"}),
+                            html.Div(dcc.Graph(id="adx-chart",
+                                               figure=_empty_fig(),
+                                               config={"displayModeBar":False}),
+                                     style={"flex":"1"}),
+                            html.Div(dcc.Graph(id="radar-chart",
+                                               figure=_empty_fig(240),
+                                               config={"displayModeBar":False}),
+                                     style={"width":"220px"}),
+                        ]),
+                    ]),
+
+                    # ── PATTERN TAB ────────────────────────────────────────
+                    html.Div(id="pattern-panel", style={"display":"none"}, children=[
+                        html.Img(id="pattern-img", src="",
+                                 style={"width":"100%","borderRadius":"4px",
+                                        "display":"none"}),
+                        html.Div(id="pattern-msg",
+                                 style={"color":C["muted"],"padding":"30px",
+                                        "fontSize":"12px"}),
+                    ]),
+
+                    # ── HISTORY TAB ────────────────────────────────────────
+                    html.Div(id="history-panel", style={"display":"none"}, children=[
+                        html.Div(id="history-content"),
+                    ]),
+                ]),
+            ]),
+        ]),
+    ])
+
+
+def _register_callbacks(app, cfg: dict, data_store: dict):
+
+    # ── Pull fresh state every 30s ────────────────────────────────────────────
+    @app.callback(
+        Output("state-store", "data"),
+        Input("refresh", "n_intervals"),
+    )
+    def refresh_state(_):
+        return StateManager.read()
+
+    # ── Regime banner ─────────────────────────────────────────────────────────
+    @app.callback(
+        Output("regime-banner", "children"),
+        Input("state-store", "data"),
+    )
+    def update_regime(state):
+        if not state:
+            return "Waiting for bot..."
+        r      = state.get("regime", {})
+        trend  = r.get("trend", "neutral")
+        vix    = r.get("vix", 0)
+        mult   = r.get("size_mult", 1.0)
+        sess   = state.get("market_status", "closed")
+        window = state.get("trading_window", False)
+        mode   = state.get("mode", "paper").upper()
+        updated= state.get("last_updated","")[:16].replace("T"," ")
+
+        sess_labels = {
+            "pre_market":     ("PRE-MARKET",     C["muted"]),
+            "avoid_open":     ("AVOID — OPEN",   C["bear"]),
+            "entry_morning":  ("ENTRY WINDOW ✓", C["bull"]),
+            "midday":         ("MIDDAY",         C["muted"]),
+            "entry_afternoon":("ENTRY WINDOW ✓", C["bull"]),
+            "avoid_close":    ("AVOID — CLOSE",  C["bear"]),
+            "market_close":   ("CLOSING",        C["warn"]),
+            "closed":         ("CLOSED",         C["muted"]),
+        }
+        slabel, scol = sess_labels.get(sess, ("UNKNOWN", C["muted"]))
+
+        return html.Div(style={"display":"flex","gap":"20px","alignItems":"center",
+                               "flexWrap":"wrap"}, children=[
+            html.Div([
+                html.Span("REGIME  ", style={"color":C["muted"],"fontSize":"10px"}),
+                html.Span(trend.upper(),
+                          style={"color":REGIME_C.get(trend,C["muted"]),
+                                 "fontSize":"16px","fontWeight":"bold"}),
+                html.Span(f"  VIX {vix:.1f}  ×{mult:.1f}",
+                          style={"color":C["muted"],"fontSize":"12px"}),
+            ]),
+            html.Div([
+                html.Span("SESSION  ", style={"color":C["muted"],"fontSize":"10px"}),
+                html.Span(slabel, style={"color":scol,"fontSize":"14px",
+                                         "fontWeight":"bold"}),
+            ]),
+            html.Div([
+                html.Span("MODE  ", style={"color":C["muted"],"fontSize":"10px"}),
+                html.Span(mode,
+                          style={"color":C["warn"] if mode=="LIVE" else C["accent"],
+                                 "fontSize":"14px","fontWeight":"bold"}),
+            ]),
+            html.Div(f"Updated {updated}",
+                     style={"color":C["muted"],"fontSize":"10px",
+                            "marginLeft":"auto"}),
+        ])
+
+    # ── Stats bar ─────────────────────────────────────────────────────────────
+    @app.callback(Output("stats-bar","children"), Input("state-store","data"))
+    def update_stats(state):
+        if not state:
+            return ""
+        s     = state.get("session_stats", {})
+        ls    = state.get("last_scan", {})
+        pnl   = s.get("pnl_today", 0)
+        total = s.get("total_pnl", 0)
+        return html.Div(style={"display":"flex","gap":"16px","flexWrap":"wrap",
+                                "marginTop":"6px"}, children=[
+            _stat("Today Trades",   str(s.get("trades_today",0))),
+            _stat("Today Wins",     str(s.get("wins_today",0)),    C["bull"]),
+            _stat("Today Losses",   str(s.get("losses_today",0)),  C["bear"]),
+            _stat("Open",           str(s.get("open_today",0)),    C["accent"]),
+            _stat("Today P&L",      f"${pnl:+.2f}",
+                  C["bull"] if pnl >= 0 else C["bear"]),
+            _stat("Total P&L",      f"${total:+.2f}",
+                  C["bull"] if total >= 0 else C["bear"]),
+            _stat("Win Rate",       f"{s.get('win_rate',0):.1f}%", C["bull"]),
+            _stat("Watchlist",
+                  str(ls.get("watchlist", len(state.get("watchlist",[])))),
+                  C["muted"]),
+            _stat("Weekly scan",
+                  (ls.get("weekly","—") or "—")[:10],    C["muted"]),
+            _stat("Daily scan",
+                  (ls.get("daily","—")  or "—")[:10],    C["muted"]),
+        ])
+
+    # ── Watchlist table ───────────────────────────────────────────────────────
+    @app.callback(
+        Output("watchlist-table", "data"),
+        Output("watchlist-table", "selected_rows"),
+        Input("state-store",  "data"),
+        Input("pat-filter",   "value"),
+        Input("score-filter", "value"),
+        Input("ticker-search","value"),
+    )
+    def update_table(state, pat, min_score, search):
+        rows = (state or {}).get("watchlist", [])
+        if pat != "all":
+            rows = [r for r in rows if r.get("pattern") == pat]
+        rows = [r for r in rows if float(r.get("score", 0)) >= min_score]
+
+        sel = [0]   # default: select first row
+        if search and len(search) >= 1:
+            q      = search.upper().strip()
+            exact  = [r for r in rows if r.get("ticker","").upper() == q]
+            prefix = [r for r in rows if r.get("ticker","").upper().startswith(q)
+                      and r not in exact]
+            rest   = [r for r in rows if r not in exact and r not in prefix
+                      and q in r.get("ticker","").upper()]
+            rows   = exact + prefix + rest
+            # Auto-highlight first match
+            if rows:
+                sel = [0]
+
+        return rows, sel
+
+    # ── Open positions (clickable cards) ────────────────────────────────────────
+    @app.callback(Output("positions-panel","children"), Input("state-store","data"))
+    def update_positions(state):
+        positions = (state or {}).get("open_positions", [])
+        if not positions:
+            return html.Div("No open positions",
+                           style={"color":C["muted"],"fontSize":"11px"})
+        items = []
+        for p in positions:
+            ticker = p.get("ticker","")
+            pnl    = p.get("unrealized_pnl", 0)
+            pnl_r  = p.get("unrealized_r",   0)
+            pct    = p.get("unrealized_pct",  0)
+            col    = C["bull"] if pnl >= 0 else C["bear"]
+            entry  = p.get("fill_price",    0)
+            stop   = p.get("stop",          0)
+            target = p.get("target",        0)
+            shares = p.get("shares",        0)
+            cur    = p.get("current_price", 0)
+            risk_r = (entry - stop)  if entry > stop  else 0
+            dist_t = (target - cur)  if target > cur  else 0
+            dist_s = (cur - stop)    if cur > stop     else 0
+            # Progress bar: how far between entry and target
+            progress = 0.0
+            if target > entry > 0:
+                progress = max(0.0, min(1.0, (cur - entry) / (target - entry)))
+            items.append(html.Div(
+                id={"type": "pos-card", "index": ticker},
+                n_clicks=0,
+                style={
+                    "padding":"8px 10px",
+                    "marginBottom":"6px",
+                    "borderRadius":"5px",
+                    "border":f"1px solid {C['border']}",
+                    "backgroundColor":"#1c2128",
+                    "cursor":"pointer",
+                    "transition":"border-color 0.15s",
+                },
+                children=[
+                    # Row 1: ticker + pattern + live P&L
+                    html.Div(style={"display":"flex","justifyContent":"space-between",
+                                    "alignItems":"center","marginBottom":"4px"},
+                    children=[
+                        html.Span(ticker,
+                                  style={"fontWeight":"bold","fontSize":"13px",
+                                         "color":C["text"]}),
+                        html.Span(p.get("pattern",""),
+                                  style={"color":C["muted"],"fontSize":"10px"}),
+                        html.Span(f"{pnl:+.2f}  ({pnl_r:+.2f}R)",
+                                  style={"color":col,"fontWeight":"bold",
+                                         "fontSize":"12px"}),
+                    ]),
+                    # Row 2: entry / stop / target levels
+                    html.Div(style={"display":"flex","gap":"12px","fontSize":"10px",
+                                    "marginBottom":"5px"},
+                    children=[
+                        html.Span([html.Span("Entry ", style={"color":C["muted"]}),
+                                   html.Span(f"${entry:.2f}", style={"color":C["entry"]})]),
+                        html.Span([html.Span("Stop ",  style={"color":C["muted"]}),
+                                   html.Span(f"${stop:.2f}",  style={"color":C["stop"]})]),
+                        html.Span([html.Span("Target ",style={"color":C["muted"]}),
+                                   html.Span(f"${target:.2f}",style={"color":C["target"]})]),
+                        html.Span([html.Span("Now ",   style={"color":C["muted"]}),
+                                   html.Span(f"${cur:.2f}",   style={"color":C["text"]})]),
+                        html.Span([html.Span("Shares ",style={"color":C["muted"]}),
+                                   html.Span(str(shares),     style={"color":C["text"]})]),
+                    ]),
+                    # Row 3: progress bar (entry → target)
+                    html.Div(style={"position":"relative","height":"6px",
+                                    "borderRadius":"3px",
+                                    "backgroundColor":C["border"]},
+                    children=[
+                        html.Div(style={
+                            "position":"absolute","left":"0","top":"0","bottom":"0",
+                            "width":f"{progress*100:.1f}%",
+                            "borderRadius":"3px",
+                            "backgroundColor": col,
+                            "transition":"width 0.5s",
+                        }),
+                        # Entry marker at 0%
+                        html.Div(style={"position":"absolute","left":"0","top":"-2px",
+                                        "width":"2px","height":"10px",
+                                        "backgroundColor":C["entry"]}),
+                        # Target marker at 100%
+                        html.Div(style={"position":"absolute","right":"0","top":"-2px",
+                                        "width":"2px","height":"10px",
+                                        "backgroundColor":C["target"]}),
+                    ]),
+                    # Row 4: distance labels
+                    html.Div(style={"display":"flex","justifyContent":"space-between",
+                                    "fontSize":"9px","color":C["muted"],"marginTop":"2px"},
+                    children=[
+                        html.Span(f"▼ ${dist_s:.2f} to stop"),
+                        html.Span(f"{progress*100:.0f}% to target"),
+                        html.Span(f"▲ ${dist_t:.2f} to target"),
+                    ]),
+                ]
+            ))
+        return items
+
+    # ── Activity feed ─────────────────────────────────────────────────────────
+    @app.callback(Output("activity-feed","children"), Input("state-store","data"))
+    def update_feed(state):
+        fills = (state or {}).get("recent_fills", [])
+        if not fills:
+            return html.Div("No recent activity",
+                           style={"color":C["muted"],"fontSize":"11px"})
+        items = []
+        for f in fills[:12]:
+            event = f.get("event","")
+            cols  = {"entry":C["bull"],"tp":C["accent"],"sl":C["bear"]}
+            col   = cols.get(event, C["muted"])
+            pnl   = f.get("pnl_usd")
+            pnl_s = f" ${pnl:+.2f}" if pnl is not None else ""
+            items.append(html.Div(
+                f"{f.get('time','')[11:16]}  "
+                f"{f.get('ticker','')}  {event.upper()}  "
+                f"${f.get('price',0):.2f}{pnl_s}",
+                style={"color":col,"fontSize":"10px","padding":"2px 0",
+                       "borderBottom":f"1px solid {C['border']}"}
+            ))
+        return items
+
+    # ── selected-ticker store ─────────────────────────────────────────────────
+    # Three ways to select a ticker:
+    #   1. Click a row in the watchlist table
+    #   2. Click an open-position card
+    #   3. Type in the search bar and press Enter
+    from dash import ctx, ALL
+
+    @app.callback(
+        Output("selected-ticker", "data"),
+        Input("watchlist-table", "selected_rows"),
+        Input("watchlist-table", "data"),
+        Input({"type": "pos-card", "index": ALL}, "n_clicks"),
+        Input("ticker-search", "value"),
+        prevent_initial_call=True,
+    )
+    def set_selected_ticker(sel, table_data, pos_clicks, search_val):
+        import re
+        triggered = ctx.triggered_id
+
+        # Position card clicked
+        if isinstance(triggered, dict) and triggered.get("type") == "pos-card":
+            return triggered["index"]
+
+        # Search bar typed
+        if triggered == "ticker-search" and search_val:
+            q = search_val.upper().strip()
+            if table_data:
+                # Exact match in watchlist → select immediately
+                exact = [r for r in table_data if r.get("ticker","").upper() == q]
+                if exact:
+                    return exact[0]["ticker"]
+                # Prefix filtered down to 1 result → select it
+                partial = [r for r in table_data
+                           if r.get("ticker","").upper().startswith(q)]
+                if len(partial) == 1:
+                    return partial[0]["ticker"]
+            # Valid ticker format but not in watchlist → try IB fetch
+            if re.match(r'^[A-Z]{1,5}$', q):
+                return q
+            return dash.no_update
+
+        # Watchlist row clicked
+        if sel and table_data:
+            return table_data[sel[0]].get("ticker", "")
+
+        return ""
+
+    # ── Ticker title ──────────────────────────────────────────────────────────
+    @app.callback(
+        Output("ticker-title","children"),
+        Input("selected-ticker", "data"),
+        Input("state-store",     "data"),
+    )
+    def update_ticker_title(ticker, state):
+        if not ticker:
+            return "Select a ticker from the watchlist or click an open position"
+        # Look in watchlist first, then open positions
+        wl  = (state or {}).get("watchlist",        [])
+        pos = (state or {}).get("open_positions",    [])
+        row = next((r for r in wl  if r.get("ticker") == ticker), None)
+        pos_row = next((r for r in pos if r.get("ticker") == ticker), None)
+
+        if row:
+            pnl_s = ""
+            if pos_row:
+                pnl = pos_row.get("unrealized_pnl", 0)
+                col = "🟢" if pnl >= 0 else "🔴"
+                pnl_s = f"  {col} P&L ${pnl:+.2f} ({pos_row.get('unrealized_r',0):+.2f}R)"
+            return (f"{row.get('ticker','')}  ·  {row.get('pattern','').upper()}  ·  "
+                    f"Score {row.get('score',0):.0f}  ·  R:R {row.get('rr',0):.1f}:1  ·  "
+                    f"Entry ${row.get('entry',0):.2f}  "
+                    f"Stop ${row.get('stop',0):.2f}  "
+                    f"Target ${row.get('target',0):.2f}"
+                    f"{pnl_s}")
+        if pos_row:
+            pnl = pos_row.get("unrealized_pnl", 0)
+            return (f"{ticker}  ·  {pos_row.get('pattern','').upper()}  ·  OPEN POSITION  ·  "
+                    f"Entry ${pos_row.get('fill_price',0):.2f}  "
+                    f"Stop ${pos_row.get('stop',0):.2f}  "
+                    f"Target ${pos_row.get('target',0):.2f}  ·  "
+                    f"P&L ${pnl:+.2f} ({pos_row.get('unrealized_r',0):+.2f}R)")
+        return f"{ticker}  —  not in current watchlist or positions" 
+
+    # ── Panel visibility — one callback per panel (Dash 4 compatibility) ───────
+    @app.callback(
+        Output("strategy-panel", "style"),
+        Input("detail-tabs", "value"),
+    )
+    def show_strategy(tab):
+        return {"display":"block"} if tab == "strategy" else {"display":"none"}
+
+    @app.callback(
+        Output("pattern-panel", "style"),
+        Input("detail-tabs", "value"),
+    )
+    def show_pattern(tab):
+        return {"display":"block"} if tab == "pattern" else {"display":"none"}
+
+    @app.callback(
+        Output("history-panel", "style"),
+        Input("detail-tabs", "value"),
+    )
+    def show_history(tab):
+        return {"display":"block"} if tab == "history" else {"display":"none"}
+
+    # ── Strategy chart — split into separate callbacks (Dash 4 compatibility) ──
+
+    def _get_df_and_row(ticker, state):
+        """Shared helper: returns (df, row, full_row) for a ticker string.
+        
+        Priority order for row data:
+          1. Open position  (has live fill_price, stop, target)
+          2. Watchlist row  (has score, pattern, entry, stop, target)
+          3. Empty dict     (ticker typed in search bar, not in watchlist)
+        """
+        if not ticker:
+            return pd.DataFrame(), {}, {}
+
+        wl  = (state or {}).get("watchlist",     [])
+        pos = (state or {}).get("open_positions", [])
+
+        wl_row  = next((r for r in wl  if r.get("ticker") == ticker), {})
+        pos_row = next((r for r in pos if r.get("ticker") == ticker), {})
+
+        # Merge: position levels override watchlist levels when open
+        row = {**wl_row}
+        if pos_row:
+            # Use actual fill price as entry for chart lines
+            row["entry"]  = pos_row.get("fill_price", row.get("entry",  0))
+            row["stop"]   = pos_row.get("stop",       row.get("stop",   0))
+            row["target"] = pos_row.get("target",     row.get("target", 0))
+
+        df = data_store.get(ticker, pd.DataFrame())
+        if df.empty:
+            df = _fetch_ticker(ticker, cfg)
+            if not df.empty:
+                data_store[ticker] = df
+        return df, row, row
+
+    @app.callback(
+        Output("lwc-frame", "srcDoc"),
+        Input("selected-ticker", "data"),
+        Input("state-store",     "data"),
+    )
+    def update_lwc(ticker, state):
+        df, row, _ = _get_df_and_row(ticker, state)
+        if df.empty:
+            return _no_data_html(ticker or "")
+        # Annotate whether this is an open position
+        pos = (state or {}).get("open_positions", [])
+        is_open = any(p.get("ticker") == ticker for p in pos)
+        suffix  = "  ●OPEN" if is_open else ""
+        return _lwc_html(df.iloc[-80:], row,
+                         f"{ticker} · {row.get('pattern','').upper()}{suffix}")
+
+    @app.callback(
+        Output("rsi-chart", "figure"),
+        Input("selected-ticker", "data"),
+        Input("state-store",     "data"),
+    )
+    def update_rsi(ticker, state):
+        df, _, _ = _get_df_and_row(ticker, state)
+        return _rsi_fig(df.iloc[-80:]) if not df.empty else _empty_fig()
+
+    @app.callback(
+        Output("adx-chart", "figure"),
+        Input("selected-ticker", "data"),
+        Input("state-store",     "data"),
+    )
+    def update_adx(ticker, state):
+        df, _, _ = _get_df_and_row(ticker, state)
+        return _adx_fig(df.iloc[-80:]) if not df.empty else _empty_fig()
+
+    @app.callback(
+        Output("radar-chart", "figure"),
+        Input("selected-ticker", "data"),
+        Input("state-store",     "data"),
+    )
+    def update_radar(ticker, state):
+        _, _, full = _get_df_and_row(ticker, state)
+        return _radar_fig(full) if full else _empty_fig(240)
+
+    # ── Pattern tab ───────────────────────────────────────────────────────────
+    def _find_pattern_b64(ticker):
+        hist_root = Path(cfg.get("order_history_dir","order_history"))
+        if not hist_root.exists():
+            return ""
+        for day_dir in sorted(hist_root.iterdir(), reverse=True):
+            if not day_dir.is_dir():
+                continue
+            for trade_dir in sorted(day_dir.iterdir(), reverse=True):
+                if trade_dir.name.startswith(ticker + "_"):
+                    b64 = _img_b64(trade_dir / "01b_pattern.png")
+                    if b64:
+                        return b64
+        return ""
+
+    @app.callback(
+        Output("pattern-img", "src"),
+        Input("selected-ticker", "data"),
+        Input("detail-tabs",     "value"),
+    )
+    def update_pattern_src(ticker, tab):
+        if tab != "pattern" or not ticker:
+            return ""
+        b64 = _find_pattern_b64(ticker)
+        return f"data:image/png;base64,{b64}" if b64 else ""
+
+    @app.callback(
+        Output("pattern-img", "style"),
+        Input("selected-ticker", "data"),
+        Input("detail-tabs",     "value"),
+    )
+    def update_pattern_style(ticker, tab):
+        if tab != "pattern" or not ticker:
+            return {"display":"none"}
+        b64 = _find_pattern_b64(ticker)
+        return {"width":"100%","borderRadius":"4px"} if b64 else {"display":"none"}
+
+    @app.callback(
+        Output("pattern-msg", "children"),
+        Input("selected-ticker", "data"),
+        Input("detail-tabs",     "value"),
+    )
+    def update_pattern_msg(ticker, tab):
+        if tab != "pattern" or not ticker:
+            return ""
+        b64 = _find_pattern_b64(ticker)
+        return "" if b64 else "No pattern chart yet — appears after first bot entry."
+
+    # ── History tab ───────────────────────────────────────────────────────────
+    @app.callback(
+        Output("history-content", "children"),
+        Input("selected-ticker", "data"),
+        Input("detail-tabs",     "value"),
+    )
+    def update_history(ticker, tab):
+        if tab != "history" or not ticker:
+            return ""
+        ticker = ticker  # already a string
+        master = Path(cfg.get("order_history_dir","order_history"))/"trade_log.csv"
+        if not master.exists():
+            return html.Div("No trade history yet.",
+                           style={"color":C["muted"],"padding":"20px"})
+        try:
+            df_log = pd.read_csv(master)
+            if "ticker" in df_log.columns:
+                df_log = df_log[df_log["ticker"] == ticker]
+        except Exception:
+            return html.Div("Could not load trade log.",
+                           style={"color":C["muted"],"padding":"20px"})
+        if df_log.empty:
+            return html.Div(f"No closed trades for {ticker} yet.",
+                           style={"color":C["muted"],"padding":"20px"})
+        cols = [c for c in ["fill_time","exit_time","exit_event","fill_price",
+                             "exit_price","pnl_usd","pnl_r","post_verdict",
+                             "pattern","regime","score"]
+                if c in df_log.columns]
+        return html.Div([
+            dash_table.DataTable(
+                data=df_log[cols].tail(20).to_dict("records"),
+                columns=[{"name":c.replace("_"," ").upper(),"id":c} for c in cols],
+                style_table={"overflowX":"auto"},
+                style_cell={"backgroundColor":C["panel"],"color":C["text"],
+                            "border":f"1px solid {C['border']}",
+                            "padding":"5px 8px","fontSize":"10px"},
+                style_header={"backgroundColor":C["bg"],"color":C["muted"],
+                              "fontSize":"9px","fontWeight":"bold"},
+                style_data_conditional=[
+                    {"if":{"filter_query":'{exit_event} = "tp"'},"color":C["bull"]},
+                    {"if":{"filter_query":'{exit_event} = "sl"'},"color":C["bear"]},
+                    {"if":{"filter_query":'{post_verdict} = "premature_sl"'},
+                     "color":C["warn"]},
+                ],
+            ),
+            html.Div(_load_screenshots(ticker, cfg), style={"marginTop":"10px"}),
+        ])
+
+
+def _load_screenshots(ticker: str, cfg: dict) -> list:
+    """Load all screenshots for a ticker from order_history/."""
+    hist_root = Path(cfg.get("order_history_dir","order_history"))
+    items     = []
+    for day_dir in sorted(hist_root.iterdir(), reverse=True):
+        if not day_dir.is_dir():
+            continue
+        for trade_dir in sorted(day_dir.iterdir(), reverse=True):
+            if not trade_dir.name.startswith(ticker + "_"):
+                continue
+            pngs = sorted(trade_dir.glob("*.png"))
+            if not pngs:
+                continue
+            items.append(html.Div([
+                html.Div(f"{day_dir.name}  /  {trade_dir.name}",
+                         style={"color":C["muted"],"fontSize":"10px",
+                                "margin":"10px 0 4px"}),
+                html.Div(style={"display":"flex","gap":"6px","flexWrap":"wrap"},
+                children=[
+                    html.Img(
+                        src=f"data:image/png;base64,{_img_b64(p)}",
+                        title=p.stem,
+                        style={"width":"48%","borderRadius":"4px",
+                               "border":f"1px solid {C['border']}"},
+                    ) for p in pngs if _img_b64(p)
+                ]),
+            ]))
+    return items if items else [
+        html.Div("No screenshots yet.",
+                 style={"color":C["muted"],"fontSize":"11px"})
+    ]
+
+
+def _card(**kwargs):
+    children = kwargs.pop("children", [])
+    id_      = kwargs.pop("id", None)
+    style    = kwargs.pop("style", {})
+    s = {"backgroundColor":C["panel"],"borderRadius":"6px",
+         "border":f"1px solid {C['border']}","padding":"10px", **style}
+    # Only pass id if it's actually set — Dash 4 rejects id=None
+    extra = {"id": id_} if id_ is not None else {}
+    return html.Div(children, style=s, **extra)

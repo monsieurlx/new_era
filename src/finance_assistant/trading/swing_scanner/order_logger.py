@@ -332,6 +332,28 @@ class OrderLogger:
         if self.master.exists():
             return pd.read_csv(self.master)
         return pd.DataFrame()
+    def log_pattern_chart(
+        self,
+        trade:    "Trade",
+        df_daily: pd.DataFrame,
+    ) -> Path | None:
+        """
+        Save the pattern-specific zoomed chart (Chart 2).
+        Named 01b_pattern.png inside the trade folder.
+        Called once at entry alongside log_event(..., "entry", ...).
+        """
+        folder   = self._trade_folder(trade)
+        png_path = folder / "01b_pattern.png"
+
+        if not MPL_OK or df_daily.empty:
+            return None
+        try:
+            _draw_pattern_chart(trade, df_daily, png_path, self.cfg)
+            log.info(f"[{trade.ticker}] Pattern chart → {png_path.name}")
+            return png_path
+        except Exception as e:
+            log.warning(f"Pattern chart failed for {trade.ticker}: {e}")
+            return None
 
     def get_trade_folder(self, trade: Trade) -> Path:
         return self._trade_folder(trade)
@@ -852,3 +874,269 @@ class PostTradeScheduler:
     @property
     def pending_count(self) -> int:
         return len(self._pending)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PATTERN CHART RENDERER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _draw_pattern_chart(trade: "Trade", df_daily: pd.DataFrame,
+                        path: Path, cfg: dict) -> None:
+    """
+    Dispatch to the right pattern chart based on trade.pattern.
+    Saved as 01b_pattern.png alongside the strategy chart.
+    """
+    p = trade.pattern.lower()
+    if "breakout" in p:
+        _draw_breakout_pattern(trade, df_daily, path, cfg)
+    elif "pullback" in p:
+        _draw_pullback_pattern(trade, df_daily, path, cfg)
+    elif "squeeze" in p:
+        _draw_squeeze_pattern(trade, df_daily, path, cfg)
+    else:
+        _draw_breakout_pattern(trade, df_daily, path, cfg)  # fallback
+
+
+def _draw_breakout_pattern(trade: "Trade", df: pd.DataFrame,
+                           path: Path, cfg: dict) -> None:
+    """Zoomed chart: consolidation base rectangle + breakout bar + volume surge."""
+    days   = cfg.get("consolidation_days", 15)
+    zoom   = min(days + 10, len(df))
+    df     = df.iloc[-zoom:].copy().reset_index()
+    n      = len(df)
+    h      = df["high"].values
+    lo     = df["low"].values
+    vol    = df["volume"].values
+
+    base_end   = n - 2
+    base_start = max(0, base_end - days)
+    base_high  = h[base_start:base_end].max()
+    base_low   = lo[base_start:base_end].min()
+    avg_vol    = vol[base_start:base_end].mean()
+    range_pct  = (base_high / base_low - 1) * 100
+
+    fig = plt.figure(figsize=(16, 9), facecolor=C["bg"])
+    gs  = GridSpec(2, 1, figure=fig, height_ratios=[3, 1], hspace=0.06)
+    ax_p = fig.add_subplot(gs[0])
+    ax_v = fig.add_subplot(gs[1], sharex=ax_p)
+
+    _draw_candles(ax_p, df)
+
+    # Base rectangle
+    import matplotlib.patches as patches
+    rect = patches.FancyBboxPatch(
+        (base_start - 0.4, base_low),
+        base_end - base_start + 0.8,
+        base_high - base_low,
+        boxstyle="round,pad=0.1",
+        linewidth=1.5, edgecolor=C["sma20"],
+        facecolor=C["sma20"] + "18", zorder=4,
+    )
+    ax_p.add_patch(rect)
+    ax_p.axhline(base_high, color=C["sma20"], lw=1.2, ls="--", alpha=0.8)
+    ax_p.axhline(base_low,  color=C["stop"],  lw=1.2, ls="--", alpha=0.8)
+
+    mid_y = (base_high + base_low) / 2
+    ax_p.text((base_start + base_end) / 2, mid_y,
+              f"Consolidation Base\n{base_end-base_start} bars  ·  Range {range_pct:.1f}%",
+              color=C["sma20"], fontsize=9, ha="center", va="center",
+              bbox=dict(boxstyle="round,pad=0.3", facecolor=C["bg"],
+                        edgecolor=C["sma20"], alpha=0.85))
+
+    ax_p.text(base_end + 0.3, base_high,
+              f"  Base High ${base_high:.2f}  ← Trigger", color=C["sma20"], fontsize=8)
+    ax_p.text(base_end + 0.3, base_low,
+              f"  Base Low  ${base_low:.2f}  ← Stop",    color=C["stop"],  fontsize=8)
+
+    rvol = df["volume"].iloc[-1] / avg_vol if avg_vol > 0 else 0
+    ax_p.annotate(
+        f"BREAKOUT\n+{(df['close'].iloc[-1]/base_high-1)*100:.1f}% above base\n"
+        f"RVOL {rvol:.1f}×",
+        xy=(n-1, h[-1]),
+        xytext=(max(n-8, base_end+1), h[-1]*1.016),
+        color=C["entry"], fontsize=9, fontweight="bold",
+        arrowprops=dict(arrowstyle="->", color=C["entry"], lw=1.8),
+        bbox=dict(boxstyle="round,pad=0.3", facecolor=C["bg"],
+                  edgecolor=C["entry"], alpha=0.9),
+    )
+
+    ax_p.set_title(
+        f"{trade.ticker}  ·  BREAKOUT PATTERN  ·  "
+        f"Base {base_end-base_start} bars  ·  Tightness {range_pct:.1f}%  ·  RVOL {rvol:.1f}×",
+        color=C["text"], fontsize=12, fontweight="bold", pad=10)
+    _style_ax(ax_p)
+
+    # Volume
+    bcolors = []
+    for i in range(n):
+        if i == n-1:           bcolors.append(C["entry"])
+        elif i < base_end:     bcolors.append(C["bull"] + "40")
+        else:                  bcolors.append(C["bull"] + "80")
+    ax_v.bar(range(n), vol, color=bcolors, linewidth=0)
+    ax_v.axhline(avg_vol, color=C["rsi"], lw=1.0, ls="--", alpha=0.7)
+    ax_v.annotate("Quiet base vol",
+                  xy=((base_start+base_end)//2, avg_vol*0.6),
+                  fontsize=7.5, color=C["muted"], ha="center",
+                  bbox=dict(boxstyle="round,pad=0.2", facecolor=C["bg"],
+                            edgecolor=C["border"], alpha=0.8))
+    ax_v.annotate(f"{rvol:.1f}× surge",
+                  xy=(n-1, vol[-1]), xytext=(n-5, vol[-1]*0.8),
+                  fontsize=7.5, color=C["entry"],
+                  arrowprops=dict(arrowstyle="->", color=C["entry"], lw=1.2))
+    _style_ax(ax_v, title="Volume", xlabel=True)
+    _set_xticklabels(ax_v, df)
+
+    fig.savefig(path, dpi=cfg.get("screenshot_dpi", 150),
+                bbox_inches="tight", facecolor=C["bg"])
+    plt.close(fig)
+
+
+def _draw_pullback_pattern(trade: "Trade", df: pd.DataFrame,
+                           path: Path, cfg: dict) -> None:
+    """Zoomed chart: swing high → pullback → EMA touch → reversal candle."""
+    zoom = min(45, len(df))
+    df   = df.iloc[-zoom:].copy().reset_index()
+    n    = len(df)
+    c    = df["close"].values
+    h    = df["high"].values
+    lo   = df["low"].values
+    vol  = df["volume"].values
+    e20  = _ema(c, 20)
+
+    swing_hi_idx = int(np.argmax(h[:n//2]))
+    swing_hi     = h[swing_hi_idx]
+    reversal_idx = max(swing_hi_idx + 5, n - 5)
+    pullback_pct = (swing_hi - c[reversal_idx]) / swing_hi * 100
+
+    fig = plt.figure(figsize=(16, 9), facecolor=C["bg"])
+    gs  = GridSpec(2, 1, figure=fig, height_ratios=[3, 1], hspace=0.06)
+    ax_p = fig.add_subplot(gs[0])
+    ax_v = fig.add_subplot(gs[1], sharex=ax_p)
+
+    _draw_candles(ax_p, df)
+    ax_p.plot(range(n), e20, color=C["ema20"], lw=1.5, label="EMA 20")
+
+    # Swing high
+    ax_p.annotate(f"Swing High\n${swing_hi:.2f}",
+                  xy=(swing_hi_idx, swing_hi),
+                  xytext=(swing_hi_idx+2, swing_hi*1.012),
+                  color=C["muted"], fontsize=8,
+                  arrowprops=dict(arrowstyle="->", color=C["muted"], lw=1.2))
+
+    # Pullback channel
+    import matplotlib.patches as patches
+    ax_p.fill_between(range(swing_hi_idx, reversal_idx+1),
+                      [c[i] for i in range(swing_hi_idx, reversal_idx+1)],
+                      swing_hi, color=C["bear"], alpha=0.07)
+
+    # EMA touch
+    touch = reversal_idx - 1
+    ax_p.annotate(
+        f"EMA Touch\nPullback {pullback_pct:.1f}%\nRSI reset zone",
+        xy=(touch, lo[touch]),
+        xytext=(max(touch-8,0), lo[touch]*0.982),
+        color=C["ema20"], fontsize=9, fontweight="bold",
+        arrowprops=dict(arrowstyle="->", color=C["ema20"], lw=1.8),
+        bbox=dict(boxstyle="round,pad=0.3", facecolor=C["bg"],
+                  edgecolor=C["ema20"], alpha=0.9),
+    )
+
+    # Reversal candle circle
+    rev_lo = min(df.iloc[reversal_idx]["open"], df.iloc[reversal_idx]["close"])
+    rev_hi = max(df.iloc[reversal_idx]["open"], df.iloc[reversal_idx]["close"])
+    ax_p.add_patch(patches.FancyBboxPatch(
+        (reversal_idx-0.5, rev_lo), 1.0, rev_hi-rev_lo,
+        boxstyle="round,pad=0.05",
+        edgecolor=C["entry"], facecolor="none", lw=2, zorder=6))
+    ax_p.annotate("Reversal Candle",
+                  xy=(reversal_idx, rev_hi),
+                  xytext=(reversal_idx+2, rev_hi*1.012),
+                  color=C["entry"], fontsize=9, fontweight="bold",
+                  arrowprops=dict(arrowstyle="->", color=C["entry"], lw=1.5),
+                  bbox=dict(boxstyle="round,pad=0.3", facecolor=C["bg"],
+                            edgecolor=C["entry"], alpha=0.9))
+
+    ax_p.legend(fontsize=8, loc="upper left",
+                facecolor=C["panel"], edgecolor=C["border"], labelcolor=C["text"])
+    ax_p.set_title(
+        f"{trade.ticker}  ·  PULLBACK TO EMA PATTERN  ·  "
+        f"Retracement {pullback_pct:.1f}%  ·  EMA Touch ✓  ·  Reversal Candle ✓",
+        color=C["text"], fontsize=12, fontweight="bold", pad=10)
+    _style_ax(ax_p)
+
+    bcolors = []
+    for i in range(n):
+        if swing_hi_idx <= i < reversal_idx: bcolors.append(C["bear"]+"40")
+        elif i == reversal_idx:              bcolors.append(C["entry"])
+        else:                                bcolors.append(C["bull"]+"55")
+    ax_v.bar(range(n), vol, color=bcolors, linewidth=0)
+    _style_ax(ax_v, title="Volume", xlabel=True)
+    _set_xticklabels(ax_v, df)
+
+    fig.savefig(path, dpi=cfg.get("screenshot_dpi", 150),
+                bbox_inches="tight", facecolor=C["bg"])
+    plt.close(fig)
+
+
+def _draw_squeeze_pattern(trade: "Trade", df: pd.DataFrame,
+                          path: Path, cfg: dict) -> None:
+    """Zoomed chart: Bollinger Bands contracting, ADX rising from floor."""
+    zoom = min(60, len(df))
+    df   = df.iloc[-zoom:].copy().reset_index()
+    n    = len(df)
+    c    = df["close"].values
+    h    = df["high"].values
+    lo   = df["low"].values
+
+    bb_mid, bb_up, bb_lo = _bollinger(c, 20, 2.0)
+    bw   = (bb_up - bb_lo) / (bb_mid + 1e-10) * 100
+    adx  = _adx(h, lo, c, 14)
+
+    fig = plt.figure(figsize=(16, 10), facecolor=C["bg"])
+    gs  = GridSpec(3, 1, figure=fig, height_ratios=[3, 1, 1], hspace=0.06)
+    ax_p  = fig.add_subplot(gs[0])
+    ax_bw = fig.add_subplot(gs[1], sharex=ax_p)
+    ax_a  = fig.add_subplot(gs[2], sharex=ax_p)
+
+    _draw_candles(ax_p, df)
+    ax_p.plot(range(n), bb_mid, color=C["bb"], lw=0.8, ls="--", alpha=0.5)
+    ax_p.plot(range(n), bb_up,  color=C["bb"], lw=1.0, alpha=0.7, label="BB Upper")
+    ax_p.plot(range(n), bb_lo,  color=C["bb"], lw=1.0, alpha=0.7, label="BB Lower")
+    ax_p.fill_between(range(n), bb_up, bb_lo, color=C["bb"], alpha=0.06)
+
+    sq_idx = int(np.nanargmin(bw[-30:])) + (n - 30)
+    ax_p.axvline(sq_idx, color=C["squeeze"], lw=1.5, ls="--", alpha=0.8)
+    ax_p.annotate(f"Max Squeeze\nBW {bw[sq_idx]:.1f}%\n(bottom {int(cfg.get('squeeze_percentile',0.25)*100)}th pct)",
+                  xy=(sq_idx, bb_up[sq_idx]),
+                  xytext=(sq_idx-10, bb_up[sq_idx]*1.015),
+                  color=C["squeeze"], fontsize=9, fontweight="bold",
+                  arrowprops=dict(arrowstyle="->", color=C["squeeze"], lw=1.5),
+                  bbox=dict(boxstyle="round,pad=0.3", facecolor=C["bg"],
+                            edgecolor=C["squeeze"], alpha=0.9))
+
+    ax_p.legend(fontsize=8, loc="upper left",
+                facecolor=C["panel"], edgecolor=C["border"], labelcolor=C["text"])
+    ax_p.set_title(
+        f"{trade.ticker}  ·  BB SQUEEZE PATTERN  ·  "
+        f"Bandwidth at {bw[-1]:.1f}%  ·  Compression ✓  ·  ADX rising",
+        color=C["text"], fontsize=12, fontweight="bold", pad=10)
+    _style_ax(ax_p)
+
+    ax_bw.plot(range(n), bw, color=C["squeeze"], lw=1.2, label="BB Bandwidth %")
+    ax_bw.axhline(np.nanpercentile(bw, cfg.get("squeeze_percentile",0.25)*100),
+                  color=C["muted"], lw=0.8, ls=":", alpha=0.6)
+    ax_bw.fill_between(range(n), bw,
+                       np.nanpercentile(bw, cfg.get("squeeze_percentile",0.25)*100),
+                       where=(bw <= np.nanpercentile(bw, cfg.get("squeeze_percentile",0.25)*100)),
+                       color=C["squeeze"], alpha=0.2)
+    _style_ax(ax_bw, title="BB Width %")
+
+    ax_a.plot(range(n), adx, color=C["adx"], lw=1.1, label="ADX")
+    ax_a.axhline(20, color=C["muted"], lw=0.7, ls=":", alpha=0.5)
+    ax_a.set_ylim(0, 55)
+    _style_ax(ax_a, title="ADX (14)", xlabel=True)
+    _set_xticklabels(ax_a, df)
+
+    fig.savefig(path, dpi=cfg.get("screenshot_dpi", 150),
+                bbox_inches="tight", facecolor=C["bg"])
+    plt.close(fig)

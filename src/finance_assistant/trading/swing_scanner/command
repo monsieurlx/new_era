@@ -1,0 +1,8 @@
+python run.py --mode bot --paper          # port 7497, safe
+python run.py --mode bot --live --transmit  # port 7496, real money
+--force (en dehors du market hours)
+
+python run.py --mode weekly   --paper    # Sunday evening
+python run.py --mode filter   --paper    # right after weekly
+python run.py --mode bot      --paper    # weekdays 9:25am → auto-exits 16:00
+python run.py --mode dashboard            # always-on, any time

@@ -1,61 +1,121 @@
 """
-bot.py — Entry scanner and order execution bot.
+bot.py — Market-hours bot: entry scanner + order execution + position monitor.
 
-Runs during market hours. On each scan cycle:
-  1. For each watchlist ticker: fetch fresh intraday bars (5min)
-  2. Check if daily entry trigger is still valid
-  3. Check intraday confirmation (price > trigger level for N bars)
-  4. If confirmed AND we have capacity: place bracket order (entry + TP + SL)
-  5. Monitor open positions for fill events (entry fill, TP hit, SL hit)
-  6. On any fill event: capture screenshot + log metadata
+WHEN TO RUN:
+    The bot runs from market open (9:30) to close (16:00).
+    It does NOT need to watch every tick — swing trading uses daily signals.
+    
+    Trading windows (when new entries are allowed):
+        10:00 - 11:30  Morning window   (confirmed breakouts, real volume)
+        13:30 - 15:00  Afternoon window (institutional flow resumes)
+    
+    Outside windows: bot still monitors open positions for TP/SL fills,
+    updates P&L in the dashboard, and runs post-trade snapshots.
+    It just won't place NEW entries.
 
-Safety controls:
-  - order_transmit = False in config until you're ready for live orders
-  - Max 5 concurrent positions
-  - No new entries in final 15 min of session
-  - No entries outside regular trading hours
+PAPER vs LIVE:
+    Paper: IB port 7497 (TWS) or 4002 (Gateway). order_transmit can be True.
+    Live:  IB port 7496 (TWS) or 4001 (Gateway). order_transmit MUST be True.
+    
+    Use --paper or --live flag in run.py. Never mix client_ids between modes.
 
-Usage:
-    python run.py --mode bot --watchlist watchlist.csv
+ARCHITECTURE:
+    bot.py writes all state to state.json via StateManager.
+    dashboard.py reads state.json every 30s — completely decoupled.
+    order_logger.py handles all file I/O for screenshots and trade history.
+
+AUTOMATION ON LOCAL MACHINE:
+    Windows: Task Scheduler → trigger at 9:25am weekdays
+             Action: python C:\\path\\run.py --mode bot --paper
+    Mac/Linux: crontab -e
+             25 9 * * 1-5 cd /path && python run.py --mode bot --paper
+    
+    The bot exits automatically at market close (16:00).
+    Run dashboard separately — it stays open all day.
 """
 
 import asyncio
 import logging
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 from config import CONFIG
-from ib_client import get_client, normalize_ticker
-from indicators import calc_all, calc_sma, calc_ema, calc_rsi, calc_atr
+from ib_client import get_client
+from state_manager import StateManager, get_market_session
 from order_logger import OrderLogger, Trade, PostTradeScheduler
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
-# ─── Market hours helpers ─────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# OHLCV DISK CACHE
+# Writes IB data to ohlcv_cache/ so the dashboard can read it without
+# needing its own IB connection. One parquet file per ticker.
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def _parse_time(t_str: str) -> dtime:
-    h, m = map(int, t_str.split(":"))
-    return dtime(h, m)
+def _save_ohlcv_cache(
+    data: dict,
+    cfg: dict,
+    append: bool = False,
+) -> None:
+    """
+    Save OHLCV DataFrames to disk as CSV files.
+    Called by bot after every IB fetch so dashboard always has fresh data.
+
+    Structure:
+        ohlcv_cache/
+            AAPL.csv
+            NVDA.csv
+            ...
+    """
+    from pathlib import Path
+    cache_dir = Path(cfg.get("ohlcv_cache_dir", "ohlcv_cache"))
+    cache_dir.mkdir(exist_ok=True)
+    for ticker, df in data.items():
+        if df is None or df.empty:
+            continue
+        try:
+            path = cache_dir / f"{ticker}.csv"
+            if append and path.exists():
+                # Merge new rows with existing file, drop duplicates
+                existing = pd.read_csv(path, index_col=0, parse_dates=True)
+                merged   = pd.concat([existing, df]).loc[
+                    ~pd.concat([existing, df]).index.duplicated(keep="last")
+                ].sort_index()
+                merged.to_csv(path)
+            else:
+                df.to_csv(path)
+        except Exception as e:
+            log.debug(f"Cache write failed for {ticker}: {e}")
 
 
-def is_market_open(cfg: dict) -> bool:
-    """Return True if current ET time is within tradeable window."""
-    now      = datetime.now().time()
-    open_t   = _parse_time(cfg["bot_market_open"])
-    close_t  = _parse_time(cfg["bot_market_close"])
-    no_trade = _parse_time(
-        f"{cfg['bot_market_close'].split(':')[0]}:"
-        f"{int(cfg['bot_market_close'].split(':')[1]) - cfg['bot_no_trade_last_min']}"
-    )
-    pre_buf  = cfg.get("bot_pre_entry_buffer_min", 5)
-    earliest = dtime(open_t.hour, open_t.minute + pre_buf)
-    return earliest <= now <= no_trade
+def _load_ohlcv_cache(cfg: dict) -> dict:
+    """
+    Load all cached OHLCV CSVs from disk.
+    Called by dashboard on startup.
+    Returns dict: {ticker: pd.DataFrame}
+    """
+    from pathlib import Path
+    cache_dir = Path(cfg.get("ohlcv_cache_dir", "ohlcv_cache"))
+    data = {}
+    if not cache_dir.exists():
+        return data
+    for csv_path in cache_dir.glob("*.csv"):
+        try:
+            df = pd.read_csv(csv_path, index_col=0, parse_dates=True)
+            df.columns = [c.lower() for c in df.columns]
+            if {"open","high","low","close","volume"}.issubset(df.columns):
+                data[csv_path.stem] = df
+        except Exception as e:
+            log.debug(f"Cache read failed for {csv_path.stem}: {e}")
+    return data
 
 
-# ─── Intraday confirmation ────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# INTRADAY ENTRY CONFIRMATION
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def check_entry_confirmation(
     df_intraday: pd.DataFrame,
@@ -63,359 +123,311 @@ def check_entry_confirmation(
     cfg: dict,
 ) -> bool:
     """
-    Returns True if the intraday chart confirms the daily entry signal.
-
-    Logic:
-    - The last N=bot_confirm_bars bars must have closed ABOVE the trigger price
-    - This filters out false breakouts / whipsaws on the 5min chart
+    Confirm daily entry signal on intraday (5min) chart.
+    
+    Rule: last N bars must close ABOVE trigger price with buffer.
+    This filters whipsaws — price must sustain above the level, not just touch it.
     """
     n = cfg.get("bot_confirm_bars", 1)
     if len(df_intraday) < n:
         return False
-
-    recent_closes = df_intraday["close"].iloc[-n:]
-    buffer        = 1 + cfg.get("bot_entry_trigger_buffer", 0.001)
-    return all(c > trigger_price * buffer for c in recent_closes)
-
-
-def compute_entry_trigger(watchlist_row: pd.Series, pattern: str) -> float:
-    """
-    Determine the trigger price for entry based on the pattern.
-    This comes from the scanner output (the 'entry' column).
-    """
-    return float(watchlist_row.get("entry", 0.0))
+    buf    = 1 + cfg.get("bot_entry_trigger_buffer", 0.001)
+    recent = df_intraday["close"].iloc[-n:]
+    return all(c > trigger_price * buf for c in recent)
 
 
-# ─── IB Order Placement ───────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# BRACKET ORDER PLACEMENT
+# ═══════════════════════════════════════════════════════════════════════════════
 
 async def place_bracket_order(
-    ib_client,
+    client,
     trade: Trade,
     cfg: dict,
 ) -> tuple[int, int, int]:
     """
-    Place a bracket order (parent limit entry + TP limit + SL stop).
-
-    Returns:
-        (parent_order_id, tp_order_id, sl_order_id)
-        Returns (0, 0, 0) if transmit=False (dry run) or on failure.
-
-    Bracket order structure in IB:
-        Parent:  LMT BUY  at entry_price (or slightly above for fills)
-        Child 1: LMT SELL at target_price (take profit)
-        Child 2: STP SELL at stop_price   (stop loss)
-    Both children have parentId = parent order id and transmit = True.
+    Place bracket order on IB: entry LMT + TP LMT + SL STP.
+    
+    In paper mode:  transmit=True is safe — use paper account.
+    In live mode:   transmit must be True and you accept real fills.
+    In dry-run:     transmit=False, order staged in TWS but not sent.
+    
+    Returns (parent_id, tp_id, sl_id). Returns (0,0,0) on failure or dry-run.
     """
-    from ib_async import LimitOrder, StopOrder, BracketOrder
-
-    ticker       = trade.ticker
-    shares       = trade.shares
-    entry        = trade.entry_price
-    tp           = trade.target_price
-    sl           = trade.stop_price
-    transmit     = cfg.get("order_transmit", False)
-    tif          = cfg.get("order_tif", "DAY")
-
-    # Limit price with small slippage buffer (ensure we get filled)
+    transmit = cfg.get("order_transmit", False)
+    mode     = cfg.get("trading_mode",   "paper")
     slip     = cfg.get("order_limit_slippage_pct", 0.001)
-    lmt_buy  = round(entry * (1 + slip), 2)
+    lmt_buy  = round(trade.entry_price * (1 + slip), 2)
 
-    contract = ib_client.make_stock(ticker)
+    log.info(
+        f"[{trade.ticker}] Bracket order: "
+        f"BUY {trade.shares} @ ${lmt_buy:.2f}  "
+        f"TP=${trade.target_price:.2f}  SL=${trade.stop_price:.2f}  "
+        f"mode={mode.upper()}  transmit={transmit}"
+    )
 
     if not transmit:
-        logger.info(
-            f"[DRY RUN] Would place bracket: {ticker} "
-            f"BUY {shares} @ ${lmt_buy:.2f}  TP=${tp:.2f}  SL=${sl:.2f}  "
-            f"(transmit=False in config)"
-        )
+        log.info(f"[{trade.ticker}] DRY RUN — not transmitted")
         return 0, 0, 0
 
     try:
-        bracket = ib_client.ib.bracketOrder(
+        from ib_async import LimitOrder, StopOrder
+        contract = client.make_stock(trade.ticker)
+        bracket  = client.ib.bracketOrder(
             action="BUY",
-            quantity=shares,
+            quantity=trade.shares,
             limitPrice=lmt_buy,
-            takeProfitPrice=tp,
-            stopLossPrice=sl,
+            takeProfitPrice=trade.target_price,
+            stopLossPrice=trade.stop_price,
         )
-        # Set TIF on all legs
-        for order in bracket:
-            order.tif = tif
+        tif = cfg.get("order_tif", "DAY")
+        for o in bracket:
+            o.tif = tif
 
-        # Place each leg
-        parent_trade = ib_client.ib.placeOrder(contract, bracket.parent)
-        tp_trade     = ib_client.ib.placeOrder(contract, bracket.takeProfit)
-        sl_trade     = ib_client.ib.placeOrder(contract, bracket.stopLoss)
-
-        logger.info(
-            f"Bracket placed: {ticker} BUY {shares}  "
-            f"Entry=${lmt_buy:.2f} TP=${tp:.2f} SL=${sl:.2f}  "
-            f"IDs: {parent_trade.order.orderId}/"
-            f"{tp_trade.order.orderId}/{sl_trade.order.orderId}"
-        )
-        return (parent_trade.order.orderId,
-                tp_trade.order.orderId,
-                sl_trade.order.orderId)
+        p  = client.ib.placeOrder(contract, bracket.parent)
+        tp = client.ib.placeOrder(contract, bracket.takeProfit)
+        sl = client.ib.placeOrder(contract, bracket.stopLoss)
+        return p.order.orderId, tp.order.orderId, sl.order.orderId
 
     except Exception as e:
-        logger.error(f"Order placement failed for {ticker}: {e}")
+        log.error(f"[{trade.ticker}] Order placement failed: {e}")
         return 0, 0, 0
 
 
-# ─── Position Monitor ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# POSITION MONITOR
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class PositionMonitor:
     """
-    Monitors open positions for fill events.
-
-    On each cycle:
-    - Check IB executions for parent order fills (entry confirmed)
-    - Check IB executions for TP or SL child fills (trade closed)
-    - On any close event: fetch daily + intraday data, log screenshot + JSON
+    Monitors open positions by polling IB executions every scan cycle.
+    
+    On entry fill  → logs screenshot, updates state (open position)
+    On TP/SL fill  → logs screenshot, updates state (closed), triggers post-trade
+    On position    → polls current price, updates unrealized P&L in state
     """
 
-    def __init__(self, ib_client, order_logger: OrderLogger, cfg: dict):
-        self.client    = ib_client
-        self.logger    = order_logger
+    def __init__(self, client, order_logger: OrderLogger,
+                 scheduler: PostTradeScheduler,
+                 state: StateManager, cfg: dict):
+        self.client    = client
+        self.ol        = order_logger
+        self.scheduler = scheduler
+        self.state     = state
         self.cfg       = cfg
-        self._open:    dict[int, Trade] = {}   # order_id → Trade
-        self._tp_map:  dict[int, int]   = {}   # tp_order_id → parent_order_id
-        self._sl_map:  dict[int, int]   = {}   # sl_order_id → parent_order_id
 
-    def register(self, trade: Trade, parent_id: int, tp_id: int, sl_id: int) -> None:
-        """Register a new pending trade for monitoring."""
+        # order_id → Trade
+        self._open:   dict[int, Trade] = {}
+        # child order_id → parent order_id
+        self._tp_map: dict[int, int]   = {}
+        self._sl_map: dict[int, int]   = {}
+        # seen execution ids (avoid processing twice)
+        self._seen_execs: set[str]     = set()
+
+    def register(self, trade: Trade,
+                 parent_id: int, tp_id: int, sl_id: int) -> None:
         self._open[parent_id]  = trade
         self._tp_map[tp_id]    = parent_id
         self._sl_map[sl_id]    = parent_id
-        logger.info(f"Registered: {trade.ticker} order#{parent_id}")
+        log.info(f"Registered: {trade.ticker} parent={parent_id}")
 
     async def check_fills(self, data_cache: dict[str, pd.DataFrame]) -> None:
-        """
-        Poll IB executions and handle any new fills.
-        Called on every scan cycle.
-        """
-        if not self._open:
+        """Poll IB executions and handle new fills."""
+        if not self._open and not self._tp_map and not self._sl_map:
             return
-
         try:
             executions = self.client.ib.executions()
         except Exception as e:
-            logger.warning(f"Could not fetch executions: {e}")
+            log.warning(f"Could not fetch executions: {e}")
             return
 
-        for exec_obj in executions:
-            oid  = exec_obj.orderId
-            side = exec_obj.side   # "BOT" | "SLD"
-            px   = exec_obj.price
-            ts   = datetime.now()
+        for ex in executions:
+            exec_id = getattr(ex, "execId", str(ex.orderId))
+            if exec_id in self._seen_execs:
+                continue
+            self._seen_execs.add(exec_id)
+
+            oid = ex.orderId
+            px  = ex.price
+            ts  = datetime.now()
 
             # Entry fill
-            if oid in self._open and self._open[oid].entry_time is None:
+            if oid in self._open and self._open[oid].fill_time is None:
                 trade = self._open[oid]
                 trade.on_fill(px, ts)
-                logger.info(f"ENTRY FILL: {trade.ticker} @ ${px:.2f}")
+                log.info(f"ENTRY FILL: {trade.ticker} @ ${px:.2f}")
+
+                self.state.add_open_position({
+                    "ticker":      trade.ticker,
+                    "pattern":     trade.pattern,
+                    "order_id":    oid,
+                    "fill_price":  px,
+                    "fill_time":   ts.isoformat(timespec="seconds"),
+                    "stop":        trade.stop_price,
+                    "target":      trade.target_price,
+                    "shares":      trade.shares,
+                    "current_price": px,
+                    "unrealized_pnl": 0.0,
+                    "unrealized_pct": 0.0,
+                    "unrealized_r":   0.0,
+                })
                 await self._capture(trade, "entry", data_cache)
 
             # TP fill
             elif oid in self._tp_map:
-                parent_id = self._tp_map.pop(oid)
-                trade     = self._open.pop(parent_id, None)
+                pid   = self._tp_map.pop(oid)
+                trade = self._open.pop(pid, None)
                 if trade:
                     trade.on_exit(px, ts, "tp")
-                    logger.info(f"TAKE PROFIT: {trade.ticker} @ ${px:.2f}  "
-                                f"PnL=${trade.pnl_usd:+.2f}")
+                    log.info(f"TP: {trade.ticker} @ ${px:.2f}  "
+                             f"PnL=${trade.pnl_usd:+.2f} ({trade.pnl_r:+.2f}R)")
+                    self.state.close_position(trade.ticker, px, "tp", trade.pnl_usd)
                     await self._capture(trade, "tp", data_cache)
-                    self._sl_map = {k: v for k, v in self._sl_map.items()
-                                    if v != parent_id}
+                    self.scheduler.register(trade)
+                    self._sl_map = {k: v for k,v in self._sl_map.items() if v != pid}
 
             # SL fill
             elif oid in self._sl_map:
-                parent_id = self._sl_map.pop(oid)
-                trade     = self._open.pop(parent_id, None)
+                pid   = self._sl_map.pop(oid)
+                trade = self._open.pop(pid, None)
                 if trade:
                     trade.on_exit(px, ts, "sl")
-                    logger.warning(f"STOP LOSS: {trade.ticker} @ ${px:.2f}  "
-                                   f"PnL=${trade.pnl_usd:+.2f}")
+                    log.warning(f"SL: {trade.ticker} @ ${px:.2f}  "
+                                f"PnL=${trade.pnl_usd:+.2f} ({trade.pnl_r:+.2f}R)")
+                    self.state.close_position(trade.ticker, px, "sl", trade.pnl_usd)
                     await self._capture(trade, "sl", data_cache)
-                    self._tp_map = {k: v for k, v in self._tp_map.items()
-                                    if v != parent_id}
+                    self.scheduler.register(trade)
+                    self._tp_map = {k: v for k,v in self._tp_map.items() if v != pid}
 
-    async def _capture(
-        self,
-        trade:      Trade,
-        event:      str,
-        data_cache: dict[str, pd.DataFrame],
-    ) -> None:
-        """Fetch fresh daily + intraday data, then log screenshot."""
-        ticker = trade.ticker
+    async def update_prices(self) -> None:
+        """Poll current price for each open position and update state P&L."""
+        for oid, trade in self._open.items():
+            if trade.fill_time is None:
+                continue   # not filled yet
+            try:
+                ticker = trade.ticker
+                # Use IB snapshot if connected, else skip
+                contract = self.client.make_stock(ticker)
+                [ticker_data] = self.client.ib.reqTickers(contract)
+                price = ticker_data.marketPrice()
+                if price and price > 0:
+                    self.state.update_position_price(ticker, float(price))
+            except Exception as e:
+                log.debug(f"Price update failed for {trade.ticker}: {e}")
 
-        df_daily    = data_cache.get(ticker, pd.DataFrame())
-        df_intraday = await self._fetch_intraday(ticker)
+    async def _capture(self, trade: Trade, event: str,
+                       data_cache: dict[str, pd.DataFrame]) -> None:
+        """Fetch latest data and save both strategy chart and pattern chart."""
+        ticker   = trade.ticker
+        df_daily = data_cache.get(ticker, pd.DataFrame())
 
-        self.logger.log_event(
-            trade=trade,
-            event=event,
-            df_daily=df_daily,
-            df_intraday=df_intraday,
-            extra_notes=f"Regime={trade.regime}  Score={trade.score:.1f}",
-        )
-
-    async def _fetch_intraday(self, ticker: str) -> pd.DataFrame:
-        """Fetch recent 5min bars for the ticker."""
+        # Refresh daily data to include today
         try:
-            return await self.client.fetch_historical(
+            fresh = await self.client.fetch_historical_stock(ticker)
+            if not fresh.empty:
+                df_daily = fresh
+                data_cache[ticker] = fresh
+                _save_ohlcv_cache({ticker: fresh}, cfg, append=True)
+        except Exception:
+            pass
+
+        # Fetch intraday for the entry/exit panel
+        df_intra = pd.DataFrame()
+        try:
+            df_intra = await self.client.fetch_historical(
                 self.client.make_stock(ticker),
                 duration="2 D",
-                bar_size=self.cfg["bot_intraday_bar_size"],
+                bar_size=self.cfg.get("bot_intraday_bar_size", "5 mins"),
             )
-        except Exception as e:
-            logger.debug(f"Intraday fetch failed for {ticker}: {e}")
-            return pd.DataFrame()
+        except Exception:
+            pass
+
+        # Strategy chart (Chart 1)
+        self.ol.log_event(trade, event, df_daily, df_intra,
+                          notes=f"mode={self.cfg.get('trading_mode','paper')}")
+
+        # Pattern chart (Chart 2) — only on entry
+        if event == "entry":
+            self.ol.log_pattern_chart(trade, df_daily)
 
     @property
     def open_count(self) -> int:
         return len(self._open)
 
-
-# ─── Main Bot Loop ────────────────────────────────────────────────────────────
-
-async def run_bot(cfg: dict = CONFIG, watchlist_csv: str = "watchlist.csv") -> None:
-    """
-    Main bot loop. Runs indefinitely during market hours.
-
-    Args:
-        cfg:           CONFIG dict
-        watchlist_csv: path to the elite watchlist from elite_filter.py
-    """
-    # Load watchlist
-    try:
-        watchlist = pd.read_csv(watchlist_csv)
-        logger.info(f"Watchlist loaded: {len(watchlist)} tickers from {watchlist_csv}")
-    except FileNotFoundError:
-        logger.error(f"Watchlist not found: {watchlist_csv}. Run scanner + elite filter first.")
-        return
-
-    # Connect to IB (separate client_id from scanner)
-    bot_cfg              = {**cfg, "ib_client_id": cfg["bot_ib_client_id"]}
-    client               = get_client(bot_cfg)
-    await client.connect()
-
-    order_log = OrderLogger(cfg)
-    monitor   = PositionMonitor(client, order_log, cfg)
-    scheduler = PostTradeScheduler(order_log, cfg)
-
-    # Pre-load daily data cache
-    tickers    = watchlist["ticker"].tolist()
-    data_cache = await client.fetch_all_historical(tickers)
-    logger.info(f"Daily data cache: {len(data_cache)} tickers")
-
-    interval = cfg["bot_scan_interval_sec"]
-    logger.info(f"Bot started. Scanning every {interval}s. "
-                f"transmit={'LIVE' if cfg['order_transmit'] else 'DRY RUN'}")
-
-    try:
-        while True:
-            cycle_start = datetime.now()
-
-            if not is_market_open(cfg):
-                logger.info(f"Market closed / outside trading window — sleeping {interval}s")
-                await asyncio.sleep(interval)
-                continue
-
-            logger.info(f"─── Scan cycle {cycle_start.strftime('%H:%M:%S')} "
-                        f"| Open positions: {monitor.open_count}/{cfg['bot_max_open_trades']}")
-
-            # Check fills first
-            await monitor.check_fills(data_cache)
-
-            # Post-trade follow-up snapshots (+24h, +5d)
-            await scheduler.check_pending(client.fetch_historical_stock)
-
-            # Scan for new entries
-            capacity = cfg["bot_max_open_trades"] - monitor.open_count
-            if capacity > 0:
-                await _scan_entries(
-                    watchlist, client, monitor, order_log,
-                    data_cache, cfg, capacity,
-                )
-            else:
-                logger.info("At max positions — skipping entry scan")
-
-            # Refresh daily data cache periodically (every 10 cycles)
-            # (lightweight: only refresh already-loaded tickers)
-
-            elapsed  = (datetime.now() - cycle_start).total_seconds()
-            sleep_for = max(0, interval - elapsed)
-            await asyncio.sleep(sleep_for)
-
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    finally:
-        await client.disconnect()
+    @property
+    def active_tickers(self) -> set[str]:
+        return {t.ticker for t in self._open.values()}
 
 
-async def _scan_entries(
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENTRY SCANNER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def scan_entries(
     watchlist:  pd.DataFrame,
     client,
     monitor:    PositionMonitor,
     order_log:  OrderLogger,
-    data_cache: dict,
+    data_cache: dict[str, pd.DataFrame],
+    state:      StateManager,
     cfg:        dict,
-    capacity:   int,
 ) -> None:
-    """Check each watchlist ticker for an intraday entry confirmation."""
-    entered  = 0
-    active_tickers = set(t.ticker for t in monitor._open.values())
+    """
+    Check each watchlist ticker for intraday entry confirmation.
+    Only called during active trading windows.
+    """
+    capacity = cfg["bot_max_open_trades"] - monitor.open_count
+    if capacity <= 0:
+        return
 
+    entered = 0
     for _, row in watchlist.iterrows():
         if entered >= capacity:
             break
 
-        ticker  = row["ticker"]
-        pattern = row.get("pattern", "none")
+        ticker  = str(row["ticker"])
+        pattern = str(row.get("pattern", "none"))
 
-        if ticker in active_tickers:
-            continue   # already have a position in this ticker
+        if ticker in monitor.active_tickers:
+            continue
 
-        # Fetch intraday bars for this ticker
+        # Fetch fresh intraday bars
         try:
             df_intra = await client.fetch_historical(
                 client.make_stock(ticker),
                 duration="2 D",
-                bar_size=cfg["bot_intraday_bar_size"],
+                bar_size=cfg.get("bot_intraday_bar_size", "5 mins"),
             )
         except Exception as e:
-            logger.debug(f"[{ticker}] intraday fetch error: {e}")
+            log.debug(f"[{ticker}] intraday fetch error: {e}")
             continue
 
         if df_intra.empty:
-            logger.debug(f"[{ticker}] no intraday data")
             continue
 
-        trigger_price = compute_entry_trigger(row, pattern)
-        if trigger_price <= 0:
+        trigger = float(row.get("entry", 0.0))
+        if trigger <= 0:
             continue
 
-        confirmed = check_entry_confirmation(df_intra, trigger_price, cfg)
-
-        if not confirmed:
-            logger.debug(f"[{ticker}] not confirmed at ${trigger_price:.2f}")
+        if not check_entry_confirmation(df_intra, trigger, cfg):
+            log.debug(f"[{ticker}] not confirmed @ ${trigger:.2f}")
             continue
 
-        logger.info(f"[{ticker}] ENTRY CONFIRMED — {pattern.upper()} @ ${trigger_price:.2f}")
+        log.info(f"[{ticker}] ENTRY CONFIRMED — {pattern.upper()} @ ${trigger:.2f}")
+        state.mark_watchlist_triggered(ticker)
 
-        # Build Trade object
-        # Derive swing levels from daily data for chart annotations
+        # Derive swing levels for chart annotations
         df_daily  = data_cache.get(ticker, pd.DataFrame())
         sw_low    = float(df_daily["low"].iloc[-20:].min())  if not df_daily.empty else 0.0
         sw_high   = float(df_daily["high"].iloc[-20:].max()) if not df_daily.empty else 0.0
-        atr_val   = float(row.get("atr_pct", 2.0)) / 100 * float(row.get("price", 1.0))
+        atr_val   = (float(row.get("atr_pct", 2.0)) / 100
+                     * float(row.get("price", trigger)))
 
         trade = Trade(
             ticker       = ticker,
             pattern      = pattern,
             order_id     = 0,
-            entry_price  = float(row.get("entry",  trigger_price)),
+            entry_price  = float(row.get("entry",  trigger)),
             stop_price   = float(row.get("stop",   0.0)),
             target_price = float(row.get("target", 0.0)),
             shares       = int(row.get("shares",   1)),
@@ -426,26 +438,202 @@ async def _scan_entries(
             atr          = atr_val,
             swing_low    = sw_low,
             swing_high   = sw_high,
-            extra        = {
+            extra={
                 "adx":        float(row.get("adx",        0)),
                 "rsi":        float(row.get("rsi",        0)),
                 "rvol":       float(row.get("rvol",       0)),
                 "rs_avg_pct": float(row.get("rs_avg_pct", 0)),
+                "mode":       cfg.get("trading_mode", "paper"),
             },
         )
 
-        # Place bracket order
         parent_id, tp_id, sl_id = await place_bracket_order(client, trade, cfg)
 
         if not cfg.get("order_transmit", False):
-            # Dry run — simulate a fill for logging purposes
+            # Dry run: simulate fill immediately for logging/dashboard
             trade.order_id = 9000 + entered
-            trade.on_fill(trigger_price, datetime.now())
+            trade.on_fill(trigger, datetime.now())
+            state.add_open_position({
+                "ticker":       ticker, "pattern": pattern,
+                "order_id":     trade.order_id,
+                "fill_price":   trigger,
+                "fill_time":    datetime.now().isoformat(timespec="seconds"),
+                "stop":         trade.stop_price,
+                "target":       trade.target_price,
+                "shares":       trade.shares,
+                "current_price":trigger,
+                "unrealized_pnl": 0.0, "unrealized_pct": 0.0, "unrealized_r": 0.0,
+            })
             order_log.log_event(trade, "entry", df_daily, df_intra,
-                                extra_notes="[DRY RUN]")
+                                notes="[DRY RUN]")
+            order_log.log_pattern_chart(trade, df_daily)
         else:
             trade.order_id = parent_id
             monitor.register(trade, parent_id, tp_id, sl_id)
 
-        active_tickers.add(ticker)
         entered += 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN BOT LOOP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def run_bot(cfg: dict = CONFIG, watchlist_csv: str = "watchlist.csv", force: bool = False) -> None:
+    """
+    Main bot loop. Runs until market close or KeyboardInterrupt.
+
+    Cycle (every bot_scan_interval_sec seconds):
+      1. Update market session status
+      2. Check IB execution fills (always)
+      3. Update open position prices (always)
+      4. Check post-trade snapshots (always)
+      5. Scan for new entries (only during trading windows)
+      6. Heartbeat state.json
+
+    Exits automatically at 16:00 ET.
+    """
+    mode  = cfg.get("trading_mode", "paper")
+    force = force or cfg.get("bot_force", False)
+    log.info(f"Bot starting — mode={mode.upper()}  "
+             f"transmit={cfg.get('order_transmit', False)}  "
+             f"force={'YES (ignore market hours)' if force else 'NO'}")
+
+    # Auto-detect latest watchlist from Scan_result/ folder
+    from pathlib import Path
+    scan_dir  = Path(__file__).parent / "Scan_result"
+    csv_files = sorted(
+        scan_dir.glob("watchlist_*.csv"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    resolved_csv = str(csv_files[0]) if csv_files else watchlist_csv
+    if csv_files:
+        log.info(f"Auto-detected latest watchlist: {resolved_csv}")
+    else:
+        log.warning(f"No watchlist_*.csv in Scan_result/ — using {watchlist_csv}")
+
+    try:
+        watchlist = pd.read_csv(resolved_csv)
+        log.info(f"Loaded {len(watchlist)} rows, columns: {list(watchlist.columns)}")
+        # Normalise column names (strip whitespace, lowercase)
+        watchlist.columns = [c.strip().lower() for c in watchlist.columns]
+        if "ticker" not in watchlist.columns:
+            # Try common alternatives
+            for alt in ["symbol", "stock", "asset"]:
+                if alt in watchlist.columns:
+                    watchlist = watchlist.rename(columns={alt: "ticker"})
+                    log.info(f"Renamed column '{alt}' → 'ticker'")
+                    break
+            else:
+                log.error(
+                    f"No 'ticker' column found in {resolved_csv}. "
+                    f"Columns present: {list(watchlist.columns)}"
+                )
+                return
+        watchlist = watchlist.dropna(subset=["ticker"])
+        watchlist = watchlist[watchlist["ticker"].astype(str).str.strip() != ""]
+        log.info(f"Watchlist: {len(watchlist)} tickers from {resolved_csv}")
+        if len(watchlist) == 0:
+            log.error(f"Watchlist CSV exists but contains 0 valid tickers. "
+                      f"Check {resolved_csv} — run weekly + filter again.")
+            return
+    except FileNotFoundError:
+        log.error(
+            f"Watchlist not found: {resolved_csv}. "
+            f"Run: python run.py --mode weekly && python run.py --mode filter"
+        )
+        return
+
+    # Connect IB (separate client_id from scanner, falls back to client_id + 1)
+    bot_client_id = cfg.get("bot_ib_client_id", cfg.get("ib_client_id", 1) + 1)
+    bot_cfg = {**cfg, "ib_client_id": bot_client_id}
+    client  = get_client(bot_cfg)
+    await client.connect()
+
+    # Initialise shared services
+    state      = StateManager(cfg)
+    state.set_mode(mode)
+    order_log  = OrderLogger(cfg)
+    scheduler  = PostTradeScheduler(order_log, cfg)
+    monitor    = PositionMonitor(client, order_log, scheduler, state, cfg)
+
+    # Pre-load daily data cache for all watchlist tickers
+    tickers    = watchlist["ticker"].tolist()
+    data_cache = await client.fetch_all_historical(tickers)
+    log.info(f"Daily cache ready: {len(data_cache)} tickers")
+
+    # Write OHLCV cache to disk so dashboard can read it without IB connection
+    _save_ohlcv_cache(data_cache, cfg)
+
+    # Update watchlist in state
+    wl_rows = watchlist.to_dict("records")
+    for r in wl_rows:
+        r.setdefault("status", "watching")
+    state.update_watchlist(wl_rows)
+
+    interval = cfg["bot_scan_interval_sec"]
+
+    print(f"\n{'='*55}")
+    print(f"  BOT RUNNING — {mode.upper()} MODE")
+    print(f"  Watchlist: {len(watchlist)} tickers")
+    print(f"  Max positions: {cfg['bot_max_open_trades']}")
+    print(f"  Order transmit: {cfg.get('order_transmit', False)}")
+    print(f"  Scan interval: {interval}s")
+    print(f"  Entry windows: 10:00-11:30 and 13:30-15:00 ET")
+    print(f"  Auto-exit at: 16:00 ET")
+    if force:
+        print(f"  ⚠  FORCE MODE — market hours bypassed (test/paper only)")
+    print(f"{'='*55}\n")
+
+    try:
+        while True:
+            now              = datetime.now()
+            session, label, entry_allowed = get_market_session()
+            _, _             = state.update_market_status()
+
+            # Auto-exit at close (unless --force bypasses market hours)
+            if not force and session in ("closed",) and now.hour >= 16:
+                log.info("Market closed — bot exiting for today")
+                break
+
+            log.info(
+                f"─── {now.strftime('%H:%M:%S')}  "
+                f"Session: {label}  "
+                f"Positions: {monitor.open_count}/{cfg['bot_max_open_trades']}  "
+                f"PostTrade pending: {scheduler.pending_count}"
+            )
+
+            # Always: check fills
+            await monitor.check_fills(data_cache)
+
+            # Always: update P&L for open positions
+            await monitor.update_prices()
+
+            # Always: post-trade follow-up snapshots
+            await scheduler.check_pending(client.fetch_historical_stock)
+
+            # Only during entry windows: scan for new entries
+            # --force bypasses window restriction for testing
+            if entry_allowed or force:
+                if force and not entry_allowed:
+                    log.info("  FORCE: scanning outside normal entry window")
+                await scan_entries(
+                    watchlist, client, monitor, order_log,
+                    data_cache, state, cfg,
+                )
+            else:
+                log.info(f"  Outside entry window — monitoring only")
+
+            state.heartbeat()
+
+            # Sleep until next cycle
+            await asyncio.sleep(interval)
+
+    except KeyboardInterrupt:
+        log.info("Bot stopped by user")
+    except Exception as e:
+        log.error(f"Bot crashed: {e}", exc_info=True)
+        state.add_error(str(e))
+    finally:
+        await client.disconnect()
+        log.info("Disconnected from IB")
