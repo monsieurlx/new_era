@@ -178,9 +178,13 @@ CONFIG: dict = {
     # ORDER EXECUTION
     # =========================================================================
 
-    "order_transmit":             True,   # SAFETY: False = stage in TWS, don't send
+    "order_transmit":             False,   # SAFETY: False = stage in TWS, don't send
                                            # Set True ONLY after paper testing
-    "order_tif":                  "DAY",   # time-in-force: "DAY" | "GTC"
+    "order_tif":                  "GTC",   # time-in-force: "DAY" | "GTC"
+
+    # ── Backtest settings ──────────────────────────────────────────────────────
+    "backtest_max_hold_bars":     40,      # max bars before timeout exit (~8 weeks daily)
+    "backtest_slippage_pct":      0.05,    # % slippage on simulated fills
     "order_type":                 "LMT",   # "LMT" (preferred) | "MKT"
     "order_limit_slippage_pct":   0.001,   # LMT price = trigger × (1 + this)
     "use_bracket_orders":         True,    # bracket = entry + TP + SL in one shot

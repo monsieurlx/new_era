@@ -1,0 +1,76 @@
+{
+  "total_trades": 100,
+  "win_rate_pct": 62.0,
+  "avg_r": 0.392,
+  "total_r": 39.21,
+  "total_pnl_usd": 430.6,
+  "profit_factor": 2.148,
+  "avg_win_r": 1.184,
+  "avg_loss_r": -0.899,
+  "max_win_r": 6.761,
+  "max_loss_r": -1.0,
+  "avg_bars_held": 9.5,
+  "max_drawdown_pct": -0.04,
+  "cagr_pct": 0.44,
+  "final_equity": 100440.24,
+  "starting_capital": 100000,
+  "by_pattern": {
+    "breakout": {
+      "trades": 29,
+      "win_rate": 79.3,
+      "avg_r": 0.314,
+      "total_r": 9.11
+    },
+    "pullback": {
+      "trades": 64,
+      "win_rate": 59.4,
+      "avg_r": 0.545,
+      "total_r": 34.9
+    },
+    "squeeze": {
+      "trades": 7,
+      "win_rate": 14.3,
+      "avg_r": -0.687,
+      "total_r": -4.81
+    }
+  },
+  "by_regime": {
+    "neutral": {
+      "trades": 100,
+      "win_rate": 62.0,
+      "avg_r": 0.392,
+      "total_r": 39.21
+    }
+  },
+  "by_exit": {
+    "end_of_data": {
+      "trades": 5,
+      "win_rate": 20.0,
+      "avg_r": -0.17,
+      "total_r": -0.85
+    },
+    "stop": {
+      "trades": 32,
+      "win_rate": 0.0,
+      "avg_r": -1.0,
+      "total_r": -32.0
+    },
+    "target": {
+      "trades": 59,
+      "win_rate": 100.0,
+      "avg_r": 1.206,
+      "total_r": 71.13
+    },
+    "timeout": {
+      "trades": 4,
+      "win_rate": 50.0,
+      "avg_r": 0.232,
+      "total_r": 0.93
+    }
+  },
+  "tickers_tested": 207,
+  "date_range": {
+    "from": "2025-05-23",
+    "to": "2026-02-25"
+  }
+}

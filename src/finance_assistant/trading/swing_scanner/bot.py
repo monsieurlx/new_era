@@ -48,7 +48,6 @@ from order_logger import OrderLogger, Trade, PostTradeScheduler
 
 log = logging.getLogger(__name__)
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # OHLCV DISK CACHE
 # Writes IB data to ohlcv_cache/ so the dashboard can read it without
@@ -261,6 +260,8 @@ class PositionMonitor:
                     "ticker":      trade.ticker,
                     "pattern":     trade.pattern,
                     "order_id":    oid,
+                    "tp_id":       next((k for k,v in self._tp_map.items() if v==oid), 0),
+                    "sl_id":       next((k for k,v in self._sl_map.items() if v==oid), 0),
                     "fill_price":  px,
                     "fill_time":   ts.isoformat(timespec="seconds"),
                     "stop":        trade.stop_price,
@@ -570,6 +571,15 @@ async def run_bot(cfg: dict = CONFIG, watchlist_csv: str = "watchlist.csv", forc
     for r in wl_rows:
         r.setdefault("status", "watching")
     state.update_watchlist(wl_rows)
+
+    # ── Startup reconciliation ─────────────────────────────────────────────────
+    # Re-submit any bracket orders that disappeared (IB paper reset, disconnect, etc.)
+    from reconcile import reconcile_on_startup
+    n_reconciled = await reconcile_on_startup(
+        client, monitor, state, order_log, data_cache, cfg
+    )
+    if n_reconciled:
+        log.info(f"Reconcile: {n_reconciled} order(s) re-submitted to IB")
 
     interval = cfg["bot_scan_interval_sec"]
 

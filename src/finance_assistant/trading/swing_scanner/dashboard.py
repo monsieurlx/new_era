@@ -322,49 +322,68 @@ def _stat(label, value, color=None):
 # APP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _fetch_ticker(ticker: str, cfg: dict) -> pd.DataFrame:
-    """
-    Fetch OHLCV for a single ticker.
+# IB bar_size string and max duration for each dashboard barsize code
+_IB_BAR_PARAMS = {
+    "5m":  ("5 mins",  "10 D"),   # IB max ~10 days for 5-min
+    "15m": ("15 mins", "20 D"),
+    "1h":  ("1 hour",  "30 D"),
+    "4h":  ("4 hours", "30 D"),
+    "1D":  ("1 day",   "1 Y"),
+    "1W":  ("1 day",   "1 Y"),    # fetched as 1D, resampled to weekly
+    "1M":  ("1 day",   "1 Y"),    # fetched as 1D, resampled to monthly
+}
 
-    Priority:
-      1. ohlcv_cache/{ticker}.csv — written by bot from IB data
-      2. IB live fetch — if cache miss and IB is reachable
-      3. Empty DataFrame — chart will show "no data" message
+
+def _fetch_ticker(ticker: str, cfg: dict, barsize: str = "1D") -> pd.DataFrame:
+    """
+    Fetch OHLCV for a single ticker at the requested bar granularity.
+
+    For daily/weekly/monthly: reads from ohlcv_cache/{ticker}.csv (written by bot)
+    then falls back to IB live fetch.
+
+    For intraday (5m/15m/1h/4h): always fetches live from IB — no disk cache
+    for intraday since it changes every session.
     """
     from pathlib import Path
 
-    # Try disk cache first
-    cache_path = Path(cfg.get("ohlcv_cache_dir", "ohlcv_cache")) / f"{ticker}.csv"
-    if cache_path.exists():
-        try:
-            df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
-            df.columns = [c.lower() for c in df.columns]
-            if {"open","high","low","close","volume"}.issubset(df.columns):
-                log.info(f"[{ticker}] loaded from ohlcv_cache/")
-                return df
-        except Exception as e:
-            log.warning(f"Cache read failed {ticker}: {e}")
+    intraday = barsize in ("5m", "15m", "1h", "4h")
 
-    # Cache miss — try IB live fetch
-    log.info(f"[{ticker}] not in cache, attempting IB fetch...")
+    if not intraday:
+        # Try disk cache first (daily data written by bot)
+        cache_path = Path(cfg.get("ohlcv_cache_dir", "ohlcv_cache")) / f"{ticker}.csv"
+        if cache_path.exists():
+            try:
+                df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+                df.columns = [c.lower() for c in df.columns]
+                if {"open","high","low","close","volume"}.issubset(df.columns):
+                    log.info(f"[{ticker}] loaded from ohlcv_cache/")
+                    return df
+            except Exception as e:
+                log.warning(f"Cache read failed {ticker}: {e}")
+
+    # Live IB fetch (always for intraday, fallback for daily)
+    ib_bar, ib_dur = _IB_BAR_PARAMS.get(barsize, ("1 day", "1 Y"))
+    log.info(f"[{ticker}] IB fetch: bar={ib_bar} dur={ib_dur}")
     try:
         import asyncio
         from ib_client import get_client
         async def _fetch():
             client = get_client(cfg)
             await client.connect()
-            df = await client.fetch_historical_stock(ticker)
+            df = await client.fetch_historical(
+                client.make_stock(ticker),
+                duration=ib_dur,
+                bar_size=ib_bar,
+            )
             await client.disconnect()
             return df
         df = asyncio.run(_fetch())
-        if not df.empty:
-            # Save to cache for next time
+        if not df.empty and not intraday:
             from bot import _save_ohlcv_cache
             _save_ohlcv_cache({ticker: df}, cfg)
         return df
     except Exception as e:
-        log.warning(f"IB fetch failed for {ticker}: {e}. "
-                    f"Run bot first to populate ohlcv_cache/.")
+        log.warning(f"IB fetch failed for {ticker}: {e}")
         return pd.DataFrame()
 
 
@@ -379,6 +398,37 @@ def build_app(cfg: dict, data_store: dict = None) -> "dash.Dash":
     app.layout = _build_layout(cfg)
     _register_callbacks(app, cfg, data_store)
     return app
+
+
+def _slice_period(df: pd.DataFrame, period: str, barsize: str = "1D") -> pd.DataFrame:
+    """Return rows within the selected lookback period.
+    For intraday data, period is in trading days × bars/day.
+    """
+    if df.empty or period == "ALL":
+        return df
+    # Bars per day for each barsize
+    bars_per_day = {"5m": 78, "15m": 26, "1h": 7, "4h": 2, "1D": 1, "1W": 1, "1M": 1}
+    bpd = bars_per_day.get(barsize, 1)
+    # Trading days per period
+    td = {"1D":1,"3D":3,"5D":5,"1M":21,"3M":63,"6M":126,"1Y":252}
+    days = td.get(period, 252)
+    n = days * bpd
+    return df.iloc[-n:] if len(df) > n else df
+
+
+def _resample_df(df: pd.DataFrame, barsize: str) -> pd.DataFrame:
+    """Resample a daily OHLCV DataFrame to weekly or monthly bars."""
+    if df.empty or barsize == "1D":
+        return df
+    rule = {"1W": "W-FRI", "1M": "MS"}.get(barsize, "W-FRI")
+    try:
+        agg = {"open": "first", "high": "max", "low": "min",
+               "close": "last", "volume": "sum"}
+        present = {k: v for k, v in agg.items() if k in df.columns}
+        rs = df.resample(rule).agg(present).dropna(subset=["close"])
+        return rs
+    except Exception:
+        return df
 
 
 def _build_layout(cfg: dict):
@@ -533,13 +583,57 @@ def _build_layout(cfg: dict):
                                 selected_style={"color":C["text"],"backgroundColor":C["panel"],
                                                 "fontSize":"11px","padding":"6px 12px",
                                                 "borderTop":f"2px solid {C['accent']}"}),
+                        dcc.Tab(label="Backtest", value="backtest",
+                                style={"color":C["muted"],"backgroundColor":C["bg"],
+                                       "fontSize":"11px","padding":"6px 12px"},
+                                selected_style={"color":C["text"],"backgroundColor":C["panel"],
+                                                "fontSize":"11px","padding":"6px 12px",
+                                                "borderTop":f"2px solid #f0a500"}),
                     ]),
 
                     # ── STRATEGY TAB (static IDs — always in DOM) ──────────
                     html.Div(id="strategy-panel", children=[
+
+                        # Timeframe toolbar
+                        html.Div(style={
+                            "display":"flex","gap":"6px","alignItems":"center",
+                            "marginBottom":"6px","flexWrap":"wrap",
+                        }, children=[
+                            # Bar-size buttons (intraday + daily+ )
+                            _label("TF"),
+                            html.Div(style={"display":"flex","gap":"2px"}, children=[
+                                html.Button(b, id={"type":"barsize-btn","index":b},
+                                    n_clicks=0,
+                                    style={"backgroundColor": C["accent"] if b=="1D" else C["panel"],
+                                           "color":           "#fff"       if b=="1D" else C["muted"],
+                                           "border":          f"1px solid {C['border']}",
+                                           "borderRadius":"3px","padding":"3px 8px",
+                                           "fontSize":"11px","cursor":"pointer",
+                                           "fontFamily":"monospace","fontWeight":"600"},
+                                ) for b in ["5m","15m","1h","4h","1D","1W","1M"]
+                            ]),
+                            html.Span("│", style={"color":C["border"],"margin":"0 2px"}),
+                            # Period buttons — smart range (intraday auto-limits)
+                            _label("Range"),
+                            html.Div(style={"display":"flex","gap":"2px"}, children=[
+                                html.Button(p, id={"type":"period-btn","index":p},
+                                    n_clicks=0,
+                                    style={"backgroundColor": C["accent"] if p=="1Y" else C["panel"],
+                                           "color":           "#fff"       if p=="1Y" else C["muted"],
+                                           "border":          f"1px solid {C['border']}",
+                                           "borderRadius":"3px","padding":"3px 8px",
+                                           "fontSize":"11px","cursor":"pointer",
+                                           "fontFamily":"monospace","fontWeight":"600"},
+                                ) for p in ["1D","3D","5D","1M","3M","6M","1Y","ALL"]
+                            ]),
+                            # Stores
+                            dcc.Store(id="chart-period",  data="1Y"),
+                            dcc.Store(id="chart-barsize", data="1D"),
+                        ]),
+
                         dcc.Loading(type="circle", color=C["accent"], children=[
                             html.Iframe(id="lwc-frame", srcDoc="",
-                                style={"width":"100%","height":"510px",
+                                style={"width":"100%","height":"490px",
                                        "border":f"1px solid {C['border']}",
                                        "borderRadius":"4px",
                                        "background":C["panel"]}),
@@ -574,6 +668,65 @@ def _build_layout(cfg: dict):
                     # ── HISTORY TAB ────────────────────────────────────────
                     html.Div(id="history-panel", style={"display":"none"}, children=[
                         html.Div(id="history-content"),
+                    ]),
+
+                    # ── BACKTEST TAB ───────────────────────────────────────
+                    html.Div(id="backtest-panel", style={"display":"none"}, children=[
+
+                        # Controls bar
+                        html.Div(style={
+                            "display":"flex","gap":"12px","alignItems":"center",
+                            "flexWrap":"wrap","padding":"10px 0 12px",
+                            "borderBottom":f"1px solid {C['border']}","marginBottom":"12px",
+                        }, children=[
+                            html.Div(style={"display":"flex","flexDirection":"column","gap":"2px"}, children=[
+                                _label("Min Score"),
+                                dcc.Slider(id="bt-score", min=30, max=80, step=5, value=50,
+                                           marks={i:str(i) for i in range(30,85,10)},
+                                           tooltip={"always_visible":False},
+                                           updatemode="mouseup",
+                                           style={"width":"180px"}),
+                            ]),
+                            html.Div(style={"display":"flex","flexDirection":"column","gap":"2px"}, children=[
+                                _label("Capital ($)"),
+                                dcc.Input(id="bt-capital", type="number", value=100000,
+                                          step=10000, debounce=True,
+                                          style={"backgroundColor":C["bg"],"color":C["text"],
+                                                 "border":f"1px solid {C['border']}",
+                                                 "borderRadius":"4px","padding":"3px 8px",
+                                                 "fontSize":"11px","width":"110px"}),
+                            ]),
+                            html.Div(style={"display":"flex","flexDirection":"column","gap":"2px"}, children=[
+                                _label("From Date"),
+                                dcc.Input(id="bt-from", type="text", value="", debounce=True,
+                                          placeholder="YYYY-MM-DD",
+                                          style={"backgroundColor":C["bg"],"color":C["text"],
+                                                 "border":f"1px solid {C['border']}",
+                                                 "borderRadius":"4px","padding":"3px 8px",
+                                                 "fontSize":"11px","width":"110px"}),
+                            ]),
+                            html.Div(style={"display":"flex","flexDirection":"column","gap":"2px"}, children=[
+                                _label("Tickers"),
+                                dcc.Input(id="bt-tickers", type="text", value="", debounce=True,
+                                          placeholder="all  or  AAPL XOM",
+                                          style={"backgroundColor":C["bg"],"color":C["text"],
+                                                 "border":f"1px solid {C['border']}",
+                                                 "borderRadius":"4px","padding":"3px 8px",
+                                                 "fontSize":"11px","width":"140px"}),
+                            ]),
+                            html.Button("▶  Run Backtest",
+                                id="bt-run", n_clicks=0,
+                                style={"backgroundColor":"#f0a500","color":"#0d1117",
+                                       "border":"none","borderRadius":"4px",
+                                       "padding":"6px 16px","fontSize":"12px",
+                                       "fontWeight":"bold","cursor":"pointer",
+                                       "fontFamily":"monospace","marginTop":"14px"}),
+                            dcc.Store(id="bt-results", data={}),
+                        ]),
+
+                        # Results area
+                        dcc.Loading(id="bt-loading", type="circle", color="#f0a500",
+                            children=[html.Div(id="bt-output")]),
                     ]),
                 ]),
             ]),
@@ -933,6 +1086,85 @@ def _register_callbacks(app, cfg: dict, data_store: dict):
     def show_history(tab):
         return {"display":"block"} if tab == "history" else {"display":"none"}
 
+    @app.callback(
+        Output("backtest-panel", "style"),
+        Input("detail-tabs", "value"),
+    )
+    def show_backtest(tab):
+        return {"display":"block"} if tab == "backtest" else {"display":"none"}
+
+    @app.callback(
+        Output("bt-output", "children"),
+        Input("bt-run",     "n_clicks"),
+        State("bt-score",   "value"),
+        State("bt-capital", "value"),
+        State("bt-from",    "value"),
+        State("bt-tickers", "value"),
+        prevent_initial_call=True,
+    )
+    def run_bt(n_clicks, score, capital, from_str, tickers_str):
+        if not n_clicks:
+            raise dash.exceptions.PreventUpdate
+        from datetime import date as _date
+        from backtest import run_backtest, OUT_DIR
+
+        tickers = [t.strip().upper() for t in tickers_str.split()] if tickers_str else None
+        from_dt = None
+        if from_str:
+            try: from_dt = _date.fromisoformat(from_str.strip())
+            except ValueError: pass
+
+        bt_cfg = {**cfg, "min_score_display": float(score or 50)}
+        stats  = run_backtest(
+            tickers    = tickers,
+            from_date  = from_dt,
+            cfg        = bt_cfg,
+            capital    = float(capital or 100_000),
+        )
+
+        if not stats:
+            return html.Div("No trades generated. Try lowering Min Score or checking ohlcv_cache/.",
+                            style={"color":C["muted"],"padding":"20px","fontFamily":"monospace"})
+
+        report_path = OUT_DIR / "report.html"
+        report_html = report_path.read_text() if report_path.exists() else ""
+
+        wr   = stats.get("win_rate_pct", 0)
+        tr   = stats.get("total_r", 0)
+        pf   = stats.get("profit_factor", 0)
+        dd   = stats.get("max_drawdown_pct", 0)
+        cagr = stats.get("cagr_pct", 0)
+        pnl  = stats.get("total_pnl_usd", 0)
+        n    = stats.get("total_trades", 0)
+
+        def chip(label, val, color):
+            return html.Span([
+                html.Span(label, style={"fontSize":"9px","opacity":"0.65","marginRight":"3px"}),
+                html.Span(val,   style={"fontWeight":"bold","fontSize":"13px"}),
+            ], style={
+                "display":"inline-flex","alignItems":"center","padding":"3px 10px",
+                "borderRadius":"4px","marginRight":"6px","fontFamily":"monospace",
+                "border":f"1px solid {color}44","backgroundColor":f"{color}18","color":color,
+            })
+
+        summary = html.Div(style={"display":"flex","flexWrap":"wrap","gap":"4px","marginBottom":"10px"}, children=[
+            chip("TRADES",  str(n),                 "#e6edf3"),
+            chip("WIN",     f"{wr}%",               "#26a69a" if wr>50  else "#ef5350"),
+            chip("TOTAL R", f"{tr:+.1f}R",          "#26a69a" if tr>0   else "#ef5350"),
+            chip("PF",      f"{pf:.2f}",            "#26a69a" if pf>1.5 else "#f0a500"),
+            chip("CAGR",    f"{cagr:+.1f}%",        "#26a69a" if cagr>0 else "#ef5350"),
+            chip("MAX DD",  f"{dd:.1f}%",           "#ef5350"),
+            chip("P&L",     f"${pnl:+,.0f}",        "#26a69a" if pnl>0  else "#ef5350"),
+        ])
+
+        return html.Div([
+            summary,
+            html.Iframe(srcDoc=report_html,
+                        style={"width":"100%","height":"660px",
+                               "border":f"1px solid {C['border']}",
+                               "borderRadius":"4px"}),
+        ])
+
     # ── Strategy chart — split into separate callbacks (Dash 4 compatibility) ──
 
     def _get_df_and_row(ticker, state):
@@ -960,46 +1192,164 @@ def _register_callbacks(app, cfg: dict, data_store: dict):
             row["stop"]   = pos_row.get("stop",       row.get("stop",   0))
             row["target"] = pos_row.get("target",     row.get("target", 0))
 
-        df = data_store.get(ticker, pd.DataFrame())
+        # data_store keyed by "TICKER:barsize" so intraday doesn't evict daily
+        cache_key = ticker  # barsize injected at call site via kwarg
+        df = data_store.get(cache_key, pd.DataFrame())
         if df.empty:
             df = _fetch_ticker(ticker, cfg)
             if not df.empty:
-                data_store[ticker] = df
+                data_store[cache_key] = df
         return df, row, row
+
+    def _get_df_intraday(ticker, state, barsize):
+        """Fetch intraday data, using separate data_store key per barsize."""
+        if not ticker:
+            return pd.DataFrame(), {}, {}
+        cache_key = f"{ticker}:{barsize}"
+        df = data_store.get(cache_key, pd.DataFrame())
+        if df.empty:
+            df = _fetch_ticker(ticker, cfg, barsize=barsize)
+            if not df.empty:
+                data_store[cache_key] = df
+        # Get row metadata same as daily
+        wl  = (state or {}).get("watchlist",     [])
+        pos = (state or {}).get("open_positions", [])
+        wl_row  = next((r for r in wl  if r.get("ticker") == ticker), {})
+        pos_row = next((r for r in pos if r.get("ticker") == ticker), {})
+        row = {**wl_row}
+        if pos_row:
+            row["entry"]  = pos_row.get("fill_price", row.get("entry",  0))
+            row["stop"]   = pos_row.get("stop",       row.get("stop",   0))
+            row["target"] = pos_row.get("target",     row.get("target", 0))
+        return df, row, row
+
+    # ── Period and bar-size button state ─────────────────────────────────────
+    from dash import ALL as _ALL, ctx as _ctx
+
+    # Max sensible period for each bar size (IB data limits + readability)
+    _PERIOD_LIMITS = {
+        "5m":  ["1D","3D","5D"],
+        "15m": ["1D","3D","5D","1M"],
+        "1h":  ["1D","3D","5D","1M"],
+        "4h":  ["3D","5D","1M","3M"],
+        "1D":  ["1M","3M","6M","1Y","ALL"],
+        "1W":  ["3M","6M","1Y","ALL"],
+        "1M":  ["6M","1Y","ALL"],
+    }
+    _DEFAULT_PERIOD = {
+        "5m":"5D","15m":"5D","1h":"1M","4h":"3M",
+        "1D":"1Y","1W":"1Y","1M":"ALL",
+    }
+    _ALL_PERIODS  = ["1D","3D","5D","1M","3M","6M","1Y","ALL"]
+    _ALL_BARSIZES = ["5m","15m","1h","4h","1D","1W","1M"]
+
+    @app.callback(
+        Output("chart-barsize", "data"),
+        Output("chart-period",  "data"),
+        Output({"type":"barsize-btn","index":_ALL}, "style"),
+        Output({"type":"period-btn", "index":_ALL}, "style"),
+        Input({"type":"barsize-btn","index":_ALL}, "n_clicks"),
+        Input({"type":"period-btn", "index":_ALL}, "n_clicks"),
+        Input("chart-barsize", "data"),
+        Input("chart-period",  "data"),
+    )
+    def set_timeframe(bs_clicks, p_clicks, cur_bs, cur_period):
+        triggered = _ctx.triggered_id
+        bs     = cur_bs     or "1D"
+        period = cur_period or "1Y"
+
+        if isinstance(triggered, dict):
+            if triggered.get("type") == "barsize-btn":
+                bs = triggered["index"]
+                # Auto-reset period to sensible default for this bar size
+                allowed = _PERIOD_LIMITS.get(bs, _ALL_PERIODS)
+                if period not in allowed:
+                    period = _DEFAULT_PERIOD.get(bs, allowed[-1])
+            elif triggered.get("type") == "period-btn":
+                period = triggered["index"]
+
+        allowed  = _PERIOD_LIMITS.get(bs, _ALL_PERIODS)
+        btn_base = {"border":f"1px solid {C['border']}","borderRadius":"3px",
+                    "padding":"3px 8px","fontSize":"11px","cursor":"pointer",
+                    "fontFamily":"monospace","fontWeight":"600"}
+
+        bs_styles = []
+        for b in _ALL_BARSIZES:
+            bs_styles.append({**btn_base,
+                "backgroundColor": C["accent"] if b==bs  else C["panel"],
+                "color":           "#fff"       if b==bs  else C["muted"],
+            })
+
+        p_styles = []
+        for p in _ALL_PERIODS:
+            active    = p == period
+            available = p in allowed
+            p_styles.append({**btn_base,
+                "backgroundColor": C["accent"]                    if active    else C["panel"],
+                "color":           "#fff"                          if active    else
+                                   C["muted"]                      if available else C["border"],
+                "cursor":          "pointer"                       if available else "not-allowed",
+                "opacity":         "1"                             if available else "0.35",
+            })
+
+        return bs, period, bs_styles, p_styles
 
     @app.callback(
         Output("lwc-frame", "srcDoc"),
         Input("selected-ticker", "data"),
         Input("state-store",     "data"),
+        Input("chart-period",    "data"),
+        Input("chart-barsize",   "data"),
     )
-    def update_lwc(ticker, state):
-        df, row, _ = _get_df_and_row(ticker, state)
+    def update_lwc(ticker, state, period, barsize):
+        barsize = barsize or "1D"
+        period  = period  or "1Y"
+        intraday = barsize in ("5m","15m","1h","4h")
+        if intraday:
+            df, row, _ = _get_df_intraday(ticker, state, barsize)
+        else:
+            df, row, _ = _get_df_and_row(ticker, state)
+            df = _resample_df(df, barsize)
         if df.empty:
             return _no_data_html(ticker or "")
-        # Annotate whether this is an open position
+        df = _slice_period(df, period, barsize)
         pos = (state or {}).get("open_positions", [])
         is_open = any(p.get("ticker") == ticker for p in pos)
         suffix  = "  ●OPEN" if is_open else ""
-        return _lwc_html(df.iloc[-80:], row,
-                         f"{ticker} · {row.get('pattern','').upper()}{suffix}")
+        return _lwc_html(df, row,
+                         f"{ticker} · {row.get('pattern','').upper()} · {barsize}{suffix}")
 
     @app.callback(
         Output("rsi-chart", "figure"),
         Input("selected-ticker", "data"),
         Input("state-store",     "data"),
+        Input("chart-period",    "data"),
+        Input("chart-barsize",   "data"),
     )
-    def update_rsi(ticker, state):
-        df, _, _ = _get_df_and_row(ticker, state)
-        return _rsi_fig(df.iloc[-80:]) if not df.empty else _empty_fig()
+    def update_rsi(ticker, state, period, barsize):
+        barsize = barsize or "1D"
+        intraday = barsize in ("5m","15m","1h","4h")
+        df, _, _ = _get_df_intraday(ticker, state, barsize) if intraday else _get_df_and_row(ticker, state)
+        if df.empty: return _empty_fig()
+        if not intraday: df = _resample_df(df, barsize)
+        df = _slice_period(df, period or "1Y", barsize)
+        return _rsi_fig(df)
 
     @app.callback(
         Output("adx-chart", "figure"),
         Input("selected-ticker", "data"),
         Input("state-store",     "data"),
+        Input("chart-period",    "data"),
+        Input("chart-barsize",   "data"),
     )
-    def update_adx(ticker, state):
-        df, _, _ = _get_df_and_row(ticker, state)
-        return _adx_fig(df.iloc[-80:]) if not df.empty else _empty_fig()
+    def update_adx(ticker, state, period, barsize):
+        barsize = barsize or "1D"
+        intraday = barsize in ("5m","15m","1h","4h")
+        df, _, _ = _get_df_intraday(ticker, state, barsize) if intraday else _get_df_and_row(ticker, state)
+        if df.empty: return _empty_fig()
+        if not intraday: df = _resample_df(df, barsize)
+        df = _slice_period(df, period or "1Y", barsize)
+        return _adx_fig(df)
 
     @app.callback(
         Output("radar-chart", "figure"),
